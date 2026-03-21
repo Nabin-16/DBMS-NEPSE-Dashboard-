@@ -11,7 +11,7 @@ export default function FetchForm() {
         setStatus('Running NEPSE pipeline...')
 
         try {
-            const res = await fetch('/api/fetch', { method: 'POST' })
+            const res = await fetch('/api/fetch/batch', { method: 'POST' })
             const data = await res.json()
 
             if (!res.ok) {

@@ -20,6 +20,18 @@ interface CountRow extends RowDataPacket {
 
 const executionCache: Record<string, boolean> = {}
 
+function resolveBatchFetcherPath(): string | null {
+    const candidates = [
+        process.env.BATCH_FETCH_PATH,
+        path.join(process.cwd(), 'scripts', 'batch_fetch.py'),
+    ].filter(Boolean) as string[]
+
+    for (const p of candidates) {
+        if (fs.existsSync(p)) return p
+    }
+    return null
+}
+
 function resolvePipelinePath(configuredPath?: string): { resolvedPath: string | null; hint?: string } {
     if (configuredPath && fs.existsSync(configuredPath)) {
         return { resolvedPath: configuredPath }
@@ -160,11 +172,12 @@ export async function POST(
         const pipelinePath = process.env.PIPELINE_PATH
         const pythonPath = process.env.PYTHON_PATH ?? 'python'
         const resolved = resolvePipelinePath(pipelinePath)
+        const batchFetcherPath = resolveBatchFetcherPath()
 
-        if (!resolved.resolvedPath) {
+        if (!resolved.resolvedPath && !batchFetcherPath) {
             return NextResponse.json(
                 {
-                    error: `Pipeline not found at: ${pipelinePath}`,
+                    error: 'No data fetcher script found',
                     details: resolved.hint,
                 },
                 { status: 500 }
@@ -216,6 +229,48 @@ export async function POST(
             })
         }
 
+        if (batchFetcherPath) {
+            const batchRun = await runProcess(pythonPath, [
+                batchFetcherPath,
+                '--from',
+                fromDate,
+                '--to',
+                toDate,
+            ], {
+                cwd: process.cwd(),
+                timeoutMs: 10 * 60 * 1000,
+                env: {
+                    ...process.env,
+                    PYTHONIOENCODING: 'utf-8',
+                    PYTHONUTF8: '1',
+                },
+            })
+
+            if (batchRun.code !== 0) {
+                return NextResponse.json(
+                    {
+                        error: 'Batch fetch execution failed',
+                        details: batchRun.stderr.slice(-600) || batchRun.stdout.slice(-600),
+                    },
+                    { status: 500 }
+                )
+            }
+
+            executionCache[cacheKey] = true
+
+            return NextResponse.json({
+                success: true,
+                symbol: symbol.toUpperCase(),
+                fromDate,
+                toDate,
+                targetTradingDate,
+                cached: false,
+                mode: 'batch-fetch',
+                message: `Batch fetch loaded data for ${fromDate} to ${toDate}`,
+                output: batchRun.stdout.slice(-500),
+            })
+        }
+
         // Use the original startup technique: fetch all companies for a date.
         const stdinInput = [
             'f',
@@ -224,8 +279,19 @@ export async function POST(
             targetTradingDate,
         ].join('\n')
 
-        const pipelineDir = path.dirname(resolved.resolvedPath)
-        const pipelineRun = await runProcess(pythonPath, [resolved.resolvedPath], {
+        const resolvedPipelinePath = resolved.resolvedPath
+        if (!resolvedPipelinePath) {
+            return NextResponse.json(
+                {
+                    error: 'Pipeline path unresolved for fallback execution',
+                    details: resolved.hint,
+                },
+                { status: 500 }
+            )
+        }
+
+        const pipelineDir = path.dirname(resolvedPipelinePath)
+        const pipelineRun = await runProcess(pythonPath, [resolvedPipelinePath], {
             cwd: pipelineDir,
             stdin: stdinInput,
             timeoutMs: 8 * 60 * 1000,

@@ -43,7 +43,7 @@ export default function DataFetchForm() {
                 return
             }
 
-            const res = await fetch('/api/fetch', {
+            const res = await fetch('/api/fetch/batch', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),

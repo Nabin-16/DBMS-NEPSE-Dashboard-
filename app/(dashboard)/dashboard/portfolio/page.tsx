@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
+import WatchlistPopup from '@/components/WatchlistPopup'
 
 interface CompanyMetrics {
     symbol: string
@@ -36,6 +37,7 @@ export default function PortfolioPage() {
     const [selectedMetrics, setSelectedMetrics] = useState<CompanyMetrics | null>(null)
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState('')
+    const [showWatchlistPopup, setShowWatchlistPopup] = useState(false)
 
     useEffect(() => {
         async function fetchCompanies() {
@@ -265,13 +267,27 @@ export default function PortfolioPage() {
                                     className="w-full px-4 py-2 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-emerald-400 hover:bg-emerald-500/30 transition-colors text-sm font-medium text-center">
                                     View Detailed Chart
                                 </Link>
-                                <button onClick={async () => { try { const res = await fetch('/api/watchlist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ symbol: selectedMetrics.symbol }) }); if (res.ok) { alert('Added to watchlist!') } else { const error = await res.json(); alert(error.error || 'Failed to add') } } catch (err) { alert('Error adding to watchlist') } }} className="w-full px-4 py-2 rounded-lg bg-blue-500/20 border border-blue-500/50 text-blue-400 hover:bg-blue-500/30 transition-colors text-sm font-medium">
+                                <button
+                                    onClick={() => setShowWatchlistPopup(true)}
+                                    className="w-full px-4 py-2 rounded-lg bg-blue-500/20 border border-blue-500/50 text-blue-400 hover:bg-blue-500/30 transition-colors text-sm font-medium"
+                                >
                                     Add to Watchlist
                                 </button>
                             </div>
                         </div>
                     </div>
                 </div>
+            )}
+
+            {selectedMetrics && showWatchlistPopup && (
+                <WatchlistPopup
+                    symbol={selectedMetrics.symbol}
+                    name={selectedMetrics.company_name}
+                    sector={selectedMetrics.sector_name}
+                    price={selectedMetrics.close_price ?? selectedMetrics.last_price ?? undefined}
+                    change={selectedMetrics.change_percent ?? undefined}
+                    onClose={() => setShowWatchlistPopup(false)}
+                />
             )}
         </div>
     )

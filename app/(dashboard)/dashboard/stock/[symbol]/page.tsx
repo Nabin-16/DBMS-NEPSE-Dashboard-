@@ -158,10 +158,16 @@ export default async function StockPage({
                 <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
                     <h2 className="text-sm font-medium text-white mb-4">Price history</h2>
                     <PriceChart
-                        data={(history as PriceData[]).map((h: PriceData) => ({
-                            name: h.date,
-                            price: h.close ?? 0
+                        symbol={company.symbol}
+                        initialData={(history as PriceData[]).map((h: PriceData) => ({
+                            date: String(h.date),
+                            open: h.open ?? 0,
+                            high: h.high ?? 0,
+                            low: h.low ?? 0,
+                            close: h.close ?? 0,
+                            volume: h.volume ?? 0,
                         }))}
+                        title="Price vs Date"
                     />
                 </div>
             )}

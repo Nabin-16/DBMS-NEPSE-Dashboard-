@@ -2,17 +2,12 @@
 
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
-import {
-    CartesianGrid,
-    Line,
-    LineChart,
-    ResponsiveContainer,
-    Tooltip,
-    XAxis,
-    YAxis,
-} from 'recharts'
+import { useSearchParams } from 'next/navigation'
+import PriceChart from '@/components/PriceChart'
+import WatchlistFetchBanner from '@/components/WatchlistFetchBanner'
 
 interface WatchlistItem {
+    watchlist_id: number
     symbol: string
     name: string
     sector?: string
@@ -60,6 +55,10 @@ function fmt2(value: unknown): string {
 }
 
 export default function WatchlistPage() {
+    const searchParams = useSearchParams()
+    const fetchingSym = (searchParams.get('fetching') ?? '').toUpperCase()
+    const highlightSym = (searchParams.get('sym') ?? '').toUpperCase()
+
     const [items, setItems] = useState<WatchlistItem[]>([])
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
@@ -77,6 +76,7 @@ export default function WatchlistPage() {
             const payload = await res.json()
             const data = Array.isArray(payload) ? payload : []
             const normalized: WatchlistItem[] = data.map((item: any) => ({
+                watchlist_id: Number(item.watchlist_id ?? 0),
                 symbol: String(item.symbol ?? ''),
                 name: String(item.name ?? ''),
                 sector: item.sector ?? undefined,
@@ -339,6 +339,17 @@ export default function WatchlistPage() {
                 </div>
             </div>
 
+            {fetchingSym && <WatchlistFetchBanner symbol={fetchingSym} />}
+
+            {highlightSym && !fetchingSym && (
+                <div className="bg-amber-950/40 border border-amber-800/50 rounded-xl px-4 py-3 flex items-center gap-2.5">
+                    <svg className="w-4 h-4 text-amber-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <span className="text-sm text-amber-400">{highlightSym} is already in your watchlist</span>
+                </div>
+            )}
+
             {items.length === 0 ? (
                 <div className="bg-gray-900 border border-gray-800 rounded-xl p-12 text-center">
                     <div className="w-12 h-12 bg-gray-800 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -359,13 +370,14 @@ export default function WatchlistPage() {
                         const up = (item.percent_change ?? 0) >= 0
                         const isExpanded = !!expanded[item.symbol]
                         const expandData = expanded[item.symbol]
+                        const isFetching = item.symbol.toUpperCase() === fetchingSym
 
                         return (
-                            <div key={item.symbol} className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+                            <div key={item.watchlist_id || item.symbol} className={`bg-gray-900 border rounded-xl overflow-hidden ${isFetching ? 'border-emerald-800/60 shadow-sm shadow-emerald-900/30' : 'border-gray-800'}`}>
                                 {/* Main item row */}
                                 <div className="p-4 flex items-center justify-between hover:bg-gray-800/50 transition-colors">
                                     <div className="flex items-center gap-4 flex-1">
-                                        <div className="w-10 h-10 bg-gray-800 rounded-lg flex items-center justify-center text-xs font-bold text-gray-300">
+                                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-xs font-bold ${isFetching ? 'bg-emerald-600/20 text-emerald-400' : 'bg-gray-800 text-gray-300'}`}>
                                             {item.symbol?.slice(0, 2)}
                                         </div>
                                         <div className="flex-1">
@@ -381,7 +393,15 @@ export default function WatchlistPage() {
                                     </div>
 
                                     <div className="flex items-center gap-4">
-                                        {item.close_price != null ? (
+                                        {isFetching ? (
+                                            <div className="flex items-center gap-2 text-emerald-400">
+                                                <svg className="animate-spin w-3.5 h-3.5" fill="none" viewBox="0 0 24 24">
+                                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                                                </svg>
+                                                <span className="text-xs">Loading 30-day history...</span>
+                                            </div>
+                                        ) : item.close_price != null ? (
                                             <>
                                                 <div className="text-right">
                                                     <p className="text-sm font-medium text-white">
@@ -556,40 +576,17 @@ export default function WatchlistPage() {
                                             <p className="text-xs text-gray-600 p-4 text-center">No historical data found</p>
                                         ) : (
                                             <div className="space-y-4">
-                                                <div className="h-56 min-w-0 w-full rounded-lg border border-gray-800 bg-gray-900/70 p-3">
-                                                    <p className="text-xs text-gray-400 mb-2">Price vs Date</p>
-                                                    <ResponsiveContainer width="100%" height={180} minWidth={0}>
-                                                        <LineChart
-                                                            data={expandData.data.map((record) => ({
-                                                                date: new Date(record.trading_date).toLocaleDateString('en-NP', {
-                                                                    month: 'short',
-                                                                    day: 'numeric',
-                                                                }),
-                                                                close: toNumber(record.close_price),
-                                                            }))}
-                                                        >
-                                                            <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />
-                                                            <XAxis dataKey="date" stroke="#9ca3af" tick={{ fontSize: 10 }} />
-                                                            <YAxis stroke="#9ca3af" tick={{ fontSize: 10 }} domain={['auto', 'auto']} />
-                                                            <Tooltip
-                                                                contentStyle={{
-                                                                    background: '#0f172a',
-                                                                    border: '1px solid #334155',
-                                                                    borderRadius: 8,
-                                                                    color: '#f8fafc',
-                                                                    fontSize: 12,
-                                                                }}
-                                                            />
-                                                            <Line
-                                                                type="monotone"
-                                                                dataKey="close"
-                                                                stroke="#10b981"
-                                                                strokeWidth={2}
-                                                                dot={false}
-                                                            />
-                                                        </LineChart>
-                                                    </ResponsiveContainer>
-                                                </div>
+                                                <PriceChart
+                                                    title="Price vs Date"
+                                                    data={expandData.data.map((record) => ({
+                                                        name: record.trading_date,
+                                                        open: toNumber(record.open_price),
+                                                        high: toNumber(record.high_price),
+                                                        low: toNumber(record.low_price),
+                                                        close: toNumber(record.close_price),
+                                                        volume: toNumber(record.volume),
+                                                    }))}
+                                                />
 
                                                 <div className="overflow-x-auto">
                                                     <table className="w-full text-xs">
