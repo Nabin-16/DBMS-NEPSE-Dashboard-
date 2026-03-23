@@ -34,6 +34,7 @@ type PriceChartProps = {
     initialData?: PricePoint[]
     symbol?: string
     title?: string
+    onRangeChange?: (range: { from: string; to: string; mode: 'quick' | 'custom'; days?: number }) => void
 }
 
 const QUICK_RANGES = [
@@ -42,6 +43,36 @@ const QUICK_RANGES = [
     { label: '180D', days: 180 },
     { label: 'All', days: 9999 },
 ]
+
+function localIso(d: Date) {
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day}`
+}
+
+function quickBounds(days: number) {
+    const toDate = new Date()
+    const to = localIso(toDate)
+    if (days >= 9999) return { from: '2020-01-01', to }
+    const fromDate = new Date()
+    fromDate.setDate(fromDate.getDate() - days)
+    return { from: localIso(fromDate), to }
+}
+
+function normalizeDateString(value: unknown) {
+    const raw = String(value ?? '')
+    if (!raw) return ''
+    return raw.length >= 10 ? raw.slice(0, 10) : raw
+}
+
+function hasEnoughRangeData(rows: PricePoint[], from: string, to: string) {
+    const inRange = rows.filter((r) => {
+        const d = normalizeDateString(r.date)
+        return d >= from && d <= to
+    })
+    return inRange.length >= 2
+}
 
 function fmtDate(d: string) {
     return new Date(d).toLocaleDateString('en-NP', { month: 'short', day: 'numeric' })
@@ -78,11 +109,11 @@ const Tip = ({ active, payload, label }: any) => {
     )
 }
 
-export default function PriceChart({ data, initialData, symbol, title = 'Price Trend' }: PriceChartProps) {
+export default function PriceChart({ data, initialData, symbol, title = 'Price Trend', onRangeChange }: PriceChartProps) {
     const staticData = useMemo<PricePoint[]>(() => {
         if (!data) return []
         return data.map((d) => ({
-            date: d.name,
+            date: normalizeDateString(d.name),
             open: Number(d.open ?? d.close ?? 0),
             high: Number(d.high ?? d.close ?? 0),
             low: Number(d.low ?? d.close ?? 0),
@@ -99,7 +130,8 @@ export default function PriceChart({ data, initialData, symbol, title = 'Price T
     const [customTo, setCustomTo] = useState('')
     const [fetching, setFetching] = useState(false)
     const [msg, setMsg] = useState('')
-    const [newRows, setNewRows] = useState(0)
+    const [activeFrom, setActiveFrom] = useState('')
+    const [activeTo, setActiveTo] = useState('')
     const loadedRanges = useRef<Set<string>>(new Set(['30']))
 
     useEffect(() => {
@@ -107,27 +139,37 @@ export default function PriceChart({ data, initialData, symbol, title = 'Price T
             setRows(staticData)
             return
         }
-        setRows(initialData ?? [])
+        setRows(
+            (initialData ?? []).map((r) => ({
+                date: normalizeDateString(r.date),
+                open: Number(r.open ?? 0),
+                high: Number(r.high ?? 0),
+                low: Number(r.low ?? 0),
+                close: Number(r.close ?? 0),
+                volume: Number(r.volume ?? 0),
+            }))
+        )
     }, [canAutoFetch, staticData, initialData])
 
     const reloadDB = useCallback(async (from: string, to: string) => {
-        if (!symbol) return
+        if (!symbol) return [] as PricePoint[]
         const res = await fetch(`/api/stocks/${symbol}/history?from=${from}&to=${to}`)
         const json = await res.json()
-        if (!Array.isArray(json.history)) return
+        if (!Array.isArray(json.history)) return [] as PricePoint[]
 
+        let nextRows: PricePoint[] = []
         setRows((prev) => {
             const merged = [...prev, ...json.history]
             const seen = new Set<string>()
-            return merged
+            nextRows = merged
                 .filter((r) => {
-                    const k = String(r.date)
+                    const k = normalizeDateString(r.date)
                     if (seen.has(k)) return false
                     seen.add(k)
                     return true
                 })
                 .map((r: any) => ({
-                    date: String(r.date),
+                    date: normalizeDateString(r.date),
                     open: Number(r.open ?? 0),
                     high: Number(r.high ?? 0),
                     low: Number(r.low ?? 0),
@@ -135,20 +177,23 @@ export default function PriceChart({ data, initialData, symbol, title = 'Price T
                     volume: Number(r.volume ?? 0),
                 }))
                 .sort((a, b) => a.date.localeCompare(b.date))
+            return nextRows
         })
+        return nextRows
     }, [symbol])
 
     const ensureRange = useCallback(async (from: string, to: string, rangeKey: string) => {
         if (!symbol) return
 
-        if (loadedRanges.current.has(rangeKey)) {
-            await reloadDB(from, to)
+        const dbRows = await reloadDB(from, to)
+
+        if (loadedRanges.current.has(rangeKey) || hasEnoughRangeData(dbRows, from, to)) {
+            loadedRanges.current.add(rangeKey)
             return
         }
 
         setFetching(true)
         setMsg('Checking for missing data...')
-        setNewRows(0)
 
         try {
             const res = await fetch('/api/auto-fetch', {
@@ -161,14 +206,15 @@ export default function PriceChart({ data, initialData, symbol, title = 'Price T
 
             if (loaded > 0) {
                 setMsg(`Fetched ${loaded} new trading days, updating chart...`)
-                setNewRows(loaded)
             } else {
                 setMsg('Loading from database...')
             }
 
-            await reloadDB(from, to)
+            const refreshed = await reloadDB(from, to)
 
-            loadedRanges.current.add(rangeKey)
+            if (loaded > 0 || hasEnoughRangeData(refreshed, from, to)) {
+                loadedRanges.current.add(rangeKey)
+            }
 
             if (loaded > 0) {
                 setMsg(`Loaded ${loaded} new trading days`)
@@ -189,27 +235,35 @@ export default function PriceChart({ data, initialData, symbol, title = 'Price T
     useEffect(() => {
         if (!canAutoFetch) return
         if (mode !== 'quick') return
-        const to = new Date().toISOString().split('T')[0]
+        const { from, to } = quickBounds(rangeDays)
+        setActiveFrom(from)
+        setActiveTo(to)
+
         if (rangeDays >= 9999) {
-            void reloadDB('2020-01-01', to)
+            onRangeChange?.({ from, to, mode: 'quick' })
+            void reloadDB(from, to)
             return
         }
-        const from = new Date(Date.now() - rangeDays * 86400000).toISOString().split('T')[0]
+
+        onRangeChange?.({ from, to, mode: 'quick', days: rangeDays })
         void ensureRange(from, to, String(rangeDays))
-    }, [canAutoFetch, mode, rangeDays, ensureRange, reloadDB])
+    }, [canAutoFetch, mode, rangeDays, ensureRange, reloadDB, onRangeChange])
 
     useEffect(() => {
         if (!canAutoFetch) return
         if (mode !== 'custom' || !customFrom || !customTo) return
+        setActiveFrom(customFrom)
+        setActiveTo(customTo)
+        onRangeChange?.({ from: customFrom, to: customTo, mode: 'custom' })
         void ensureRange(customFrom, customTo, `${customFrom}_${customTo}`)
-    }, [canAutoFetch, mode, customFrom, customTo, ensureRange])
+    }, [canAutoFetch, mode, customFrom, customTo, ensureRange, onRangeChange])
 
     let filtered = rows
-    if (canAutoFetch && mode === 'quick' && rangeDays < 9999) {
-        const cut = new Date(Date.now() - rangeDays * 86400000)
-        filtered = rows.filter((d) => new Date(d.date) >= cut)
-    } else if (canAutoFetch && mode === 'custom' && customFrom && customTo) {
-        filtered = rows.filter((d) => d.date >= customFrom && d.date <= customTo)
+    if (canAutoFetch && activeFrom && activeTo) {
+        filtered = rows.filter((d) => {
+            const ds = normalizeDateString(d.date)
+            return ds >= activeFrom && ds <= activeTo
+        })
     }
 
     const isUp = (filtered.at(-1)?.close ?? 0) >= (filtered[0]?.close ?? 0)
@@ -264,17 +318,19 @@ export default function PriceChart({ data, initialData, symbol, title = 'Price T
                         </div>
                     )}
 
-                    <div className="ml-auto flex items-center gap-2">
-                        {fetching && (
-                            <svg className="animate-spin w-3 h-3 text-amber-400" fill="none" viewBox="0 0 24 24">
-                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8V0C5.373 0 0 5.373 0 12h4z" />
-                            </svg>
-                        )}
-                        <span className={`text-xs ${fetching ? 'text-amber-400' : msg ? 'text-emerald-400' : 'text-gray-600'}`}>
-                            {fetching || msg ? msg : `${filtered.length} trading days`}
-                        </span>
-                    </div>
+                    {(fetching || msg) && (
+                        <div className="ml-auto flex items-center gap-2">
+                            {fetching && (
+                                <svg className="animate-spin w-3 h-3 text-amber-400" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8V0C5.373 0 0 5.373 0 12h4z" />
+                                </svg>
+                            )}
+                            <span className={`text-xs ${fetching ? 'text-amber-400' : 'text-emerald-400'}`}>
+                                {msg}
+                            </span>
+                        </div>
+                    )}
                 </div>
             )}
 
@@ -286,13 +342,13 @@ export default function PriceChart({ data, initialData, symbol, title = 'Price T
                                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                             </svg>
-                            <p className="text-gray-400 text-sm">Fetching {symbol ?? 'symbol'} history from archive...</p>
+                            <p className="text-gray-400 text-sm">Fetching {symbol ?? 'symbol'} history from live chart API...</p>
                             <p className="text-gray-600 text-xs">This may take 20 to 60 seconds</p>
                         </>
                     ) : (
                         <>
                             <p className="text-gray-500 text-sm">No data for selected range</p>
-                            <p className="text-gray-600 text-xs">Select a range to auto-fetch from archive</p>
+                            <p className="text-gray-600 text-xs">Select a range to auto-sync from live chart API</p>
                         </>
                     )}
                 </div>

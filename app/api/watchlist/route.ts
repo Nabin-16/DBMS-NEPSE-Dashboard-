@@ -94,7 +94,7 @@ export async function POST(req: NextRequest) {
         .catch((e) => console.warn(`[watchlist] auto-fetch failed for ${uppercaseSymbol}:`, e))
 
     return NextResponse.json({
-        message: `${uppercaseSymbol} added. Fetching 30 days of history from archive...`,
+        message: `${uppercaseSymbol} added. Syncing 30 days of history from live chart API...`,
         fetching: true,
     })
 }

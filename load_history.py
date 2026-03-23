@@ -1,178 +1,133 @@
 """
 NEPSE Historical Loader
 ======================
-Downloads daily CSVs (or combined Excel) from OmitNomis ShareSansarScraper archive
-and loads normalized OHLCV rows into nepse_db.
+Fetches OHLCV history from merolagani chart API and synchronizes it to nepse_db.
 
 Usage:
     python load_history.py --days 90
     python load_history.py --from 2025-01-01 --to 2026-03-20
     python load_history.py --from 2025-01-01 --symbol ADBL
-    python load_history.py --excel
+    python load_history.py --symbol NABIL --days 180
 """
 
 import argparse
+import csv
 import os
 import sys
 import time
-from datetime import date, datetime, timedelta
-from io import StringIO
+from datetime import UTC, date, datetime, timedelta
 
 import mysql.connector
-import pandas as pd
 import pymysql
 import requests
 
 
 DB = dict(
-    host=os.getenv("NEPSE_DB_HOST", "localhost"),
-    port=int(os.getenv("NEPSE_DB_PORT", "3306")),
-    user=os.getenv("NEPSE_DB_USER", "root"),
-    password=os.getenv("NEPSE_DB_PASSWORD", ""),
-    database=os.getenv("NEPSE_DB_NAME", "nepse_db"),
+    host=os.getenv("NEPSE_DB_HOST") or os.getenv("DB_HOST", "localhost"),
+    port=int(os.getenv("NEPSE_DB_PORT") or os.getenv("DB_PORT", "3306")),
+    user=os.getenv("NEPSE_DB_USER") or os.getenv("DB_USER", "root"),
+    password=os.getenv("NEPSE_DB_PASSWORD") or os.getenv("DB_PASS", ""),
+    database=os.getenv("NEPSE_DB_NAME") or os.getenv("DB_NAME", "nepse_db"),
 )
 
-CSV_URL = "https://raw.githubusercontent.com/OmitNomis/ShareSansarScraper/master/docs/Data/{date}.csv"
-EXCEL_URL = "https://raw.githubusercontent.com/OmitNomis/ShareSansarScraper/master/docs/Data/combined_excel.xlsx"
-EXCEL_LOCAL = "nepse_historical.xlsx"
+CHART_URL = (
+    "https://www.merolagani.com/handlers/TechnicalChartHandler.ashx"
+    "?type=get_advanced_chart&symbol={sym}&resolution=1D"
+    "&rangeStartDate={fr}&rangeEndDate={to}"
+    "&from=&isAdjust=1&currencyCode=NPR"
+)
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
-
-
-def is_trading_day(d: str) -> bool:
-    return datetime.strptime(d, "%Y-%m-%d").weekday() not in (4, 5)
-
-
-def date_range(from_date: str, to_date: str):
-    cur = datetime.strptime(from_date, "%Y-%m-%d")
-    end = datetime.strptime(to_date, "%Y-%m-%d")
-    while cur <= end:
-        ds = cur.strftime("%Y-%m-%d")
-        if is_trading_day(ds):
-            yield ds
-        cur += timedelta(days=1)
-
-
-def clean_num(v):
-    try:
-        return float(str(v).replace(",", "").replace("%", "").strip())
-    except Exception:
-        return None
-
-
-def clean_int(v):
-    try:
-        return int(float(str(v).replace(",", "").strip()))
-    except Exception:
-        return None
-
-
-def normalize_df(df: pd.DataFrame, trading_date: str | None = None) -> pd.DataFrame:
-    col_map = {
-        "Symbol": "symbol",
-        "symbol": "symbol",
-        "SYMBOL": "symbol",
-        "Open": "open_price",
-        "open": "open_price",
-        "High": "high_price",
-        "high": "high_price",
-        "Low": "low_price",
-        "low": "low_price",
-        "Close": "close_price",
-        "close": "close_price",
-        "LTP": "close_price",
-        "Ltp": "close_price",
-        "Volume": "volume",
-        "volume": "volume",
-        "Vol": "volume",
-        "Qty.": "volume",
-        "Traded Shares": "volume",
-        "Turnover": "turnover",
-        "turnover": "turnover",
-        "Amount": "turnover",
-        "Prev. Close": "prev_close",
-        "Previous Close": "prev_close",
-        "prev_close": "prev_close",
-        "% Change": "percent_change",
-        "Percent Change": "percent_change",
-        "percent_change": "percent_change",
-        "Diff %": "percent_change",
-        "Date": "date",
-        "date": "date",
-        "Trading Date": "date",
+SESSION = requests.Session()
+SESSION.headers.update(
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "*/*",
+        "Origin": "https://www.merolagani.com",
     }
-    df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
-    # Multiple source columns can map to the same normalized name (e.g., Close/LTP).
-    # Keep the first mapped column to avoid duplicate-column assignment issues.
-    df = df.loc[:, ~df.columns.duplicated()]
-
-    if "symbol" not in df.columns:
-        return pd.DataFrame()
-
-    if "date" not in df.columns:
-        if trading_date is None:
-            return pd.DataFrame()
-        df["date"] = trading_date
-
-    def parse_date(v):
-        if isinstance(v, datetime):
-            return v.strftime("%Y-%m-%d")
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y"):
-            try:
-                return datetime.strptime(str(v).strip(), fmt).strftime("%Y-%m-%d")
-            except Exception:
-                pass
-        return None
-
-    df["date"] = df["date"].apply(parse_date)
-    df = df.dropna(subset=["date"])
-
-    for col in ["open_price", "high_price", "low_price", "close_price", "volume", "turnover", "prev_close", "percent_change"]:
-        if col in df.columns:
-            df[col] = df[col].apply(clean_num)
-
-    if "close_price" not in df.columns:
-        return pd.DataFrame()
-
-    if "open_price" not in df.columns:
-        df["open_price"] = df["close_price"]
-    if "high_price" not in df.columns:
-        df["high_price"] = df["close_price"]
-    if "low_price" not in df.columns:
-        df["low_price"] = df["close_price"]
-    if "volume" not in df.columns:
-        df["volume"] = 0
-
-    df["symbol"] = df["symbol"].astype(str).str.upper().str.strip()
-    df = df.dropna(subset=["symbol", "close_price"])
-    df = df[df["symbol"].str.len() > 1]
-    df = df[df["close_price"] > 0]
-    df = df[~df["symbol"].isin(["SYMBOL", "NAN", "#", "S.NO", "SN"])]
-
-    return df
+)
+SESSION_INIT = False
 
 
-def fetch_csv_day(d: str) -> pd.DataFrame:
-    archive_date = d.replace('-', '_')
-    url = CSV_URL.format(date=archive_date)
+def to_ts(d: str) -> int:
+    return int(datetime.strptime(d, "%Y-%m-%d").timestamp())
+
+
+def today_iso() -> str:
+    return date.today().strftime("%Y-%m-%d")
+
+
+def ago(days: int) -> str:
+    return (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def init_session(symbol: str):
+    global SESSION_INIT
+    if SESSION_INIT:
+        return
+    SESSION.headers["Referer"] = f"https://www.merolagani.com/CompanyDetail.aspx?symbol={symbol}"
     try:
-        r = requests.get(url, headers=HEADERS, timeout=25)
-        if r.status_code == 404:
-            return pd.DataFrame()
-        r.raise_for_status()
-        raw = pd.read_csv(StringIO(r.text))
-        if raw.empty:
-            return pd.DataFrame()
-        return normalize_df(raw, trading_date=d)
+        SESSION.get(f"https://www.merolagani.com/CompanyDetail.aspx?symbol={symbol}", timeout=15)
+        SESSION_INIT = True
     except Exception:
-        return pd.DataFrame()
+        pass
 
 
-def load_excel_archive(path: str) -> pd.DataFrame:
-    raw = pd.read_excel(path, sheet_name=0)
-    if raw.empty:
-        return pd.DataFrame()
-    return normalize_df(raw)
+def fetch_symbol_rows(symbol: str, from_ts: int, to_ts: int):
+    init_session(symbol)
+    SESSION.headers["Referer"] = f"https://www.merolagani.com/CompanyDetail.aspx?symbol={symbol}"
+
+    try:
+        res = SESSION.get(CHART_URL.format(sym=symbol, fr=from_ts, to=to_ts), timeout=25)
+        res.raise_for_status()
+        data = res.json()
+    except Exception as e:
+        print(f"    fetch error: {e}")
+        return []
+
+    if data.get("s") != "ok" or not data.get("t"):
+        return []
+
+    rows = []
+    seen = set()
+    ts_list = data.get("t", [])
+    o_list = data.get("o", [])
+    h_list = data.get("h", [])
+    l_list = data.get("l", [])
+    c_list = data.get("c", [])
+    v_list = data.get("v", [])
+
+    for i, ts in enumerate(ts_list):
+        try:
+            day = datetime.fromtimestamp(ts, UTC).strftime("%Y-%m-%d")
+            if day in seen:
+                continue
+            seen.add(day)
+
+            o = float(o_list[i])
+            h = float(h_list[i])
+            l = float(l_list[i])
+            c = float(c_list[i])
+            v = int(v_list[i])
+
+            if c <= 0:
+                continue
+            if h < l:
+                h, l = l, h
+
+            rows.append(
+                {
+                    "date": day,
+                    "open": o,
+                    "high": h,
+                    "low": l,
+                    "close": c,
+                    "volume": v,
+                }
+            )
+        except Exception:
+            continue
+
+    return rows
 
 
 class Loader:
@@ -237,7 +192,7 @@ class Loader:
             sid = row[0]
         else:
             self.cur.execute(
-                "INSERT INTO trading_session (trading_date, open_time, close_time, is_holiday, remarks) VALUES (%s,'11:00:00','15:00:00',0,'archive')",
+                "INSERT INTO trading_session (trading_date, open_time, close_time, is_holiday, remarks) VALUES (%s,'11:00:00','15:00:00',0,'merolagani_chart_api')",
                 (trading_date,),
             )
             self.conn.commit()
@@ -246,133 +201,169 @@ class Loader:
         self.session_cache[trading_date] = sid
         return sid
 
-    def insert_df(self, df: pd.DataFrame, symbol_filter: str | None = None):
+    def existing_dates(self, symbol: str, from_d: str, to_d: str):
+        self.cur.execute(
+            """SELECT DATE_FORMAT(t.trading_date,'%%Y-%%m-%%d')
+               FROM price_data p
+               JOIN company c ON p.company_id=c.company_id
+               JOIN trading_session t ON p.session_id=t.session_id
+               WHERE c.symbol=%s AND t.trading_date BETWEEN %s AND %s""",
+            (symbol, from_d, to_d),
+        )
+        return {str(r[0]) for r in self.cur.fetchall()}
+
+    def prev_close(self, company_id: int, d: str):
+        self.cur.execute(
+            """SELECT p.close_price FROM price_data p
+               JOIN trading_session t ON p.session_id=t.session_id
+               WHERE p.company_id=%s AND t.trading_date<%s
+               ORDER BY t.trading_date DESC LIMIT 1""",
+            (company_id, d),
+        )
+        row = self.cur.fetchone()
+        return float(row[0]) if row else None
+
+    def insert_rows(self, symbol: str, rows):
         loaded = 0
         dupes = 0
 
-        for _, row in df.iterrows():
-            sym = str(row.get("symbol", "")).upper().strip()
-            ds = str(row.get("date", "")).strip()
-            if not sym or not ds:
-                continue
-            if symbol_filter and sym != symbol_filter.upper():
-                continue
+        cid = self.company_id(symbol)
+        if not cid:
+            return 0, len(rows)
 
-            cid = self.company_id(sym)
-            if not cid:
-                continue
-            sid = self.session_id(ds)
+        for row in rows:
+            d = row["date"]
+            sid = self.session_id(d)
+            o = float(row["open"])
+            h = float(row["high"])
+            l = float(row["low"])
+            c = float(row["close"])
+            v = int(row["volume"])
 
-            o = clean_num(row.get("open_price"))
-            h = clean_num(row.get("high_price"))
-            l = clean_num(row.get("low_price"))
-            c = clean_num(row.get("close_price"))
-            v = clean_int(row.get("volume"))
-            t = clean_num(row.get("turnover"))
-            p = clean_num(row.get("prev_close"))
-            pct = clean_num(row.get("percent_change"))
-
-            if None in (o, h, l, c, v) or c <= 0:
-                continue
-            if h < l:
-                h, l = l, h
+            prev = self.prev_close(cid, d)
+            pct = round((c - prev) / prev * 100, 2) if prev and prev > 0 else None
 
             try:
                 self.cur.execute(
-                    "INSERT INTO price_data (company_id, session_id, open_price, high_price, low_price, close_price, volume, turnover, prev_close, percent_change) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                    (cid, sid, o, h, l, c, v, t, p, pct),
+                    """INSERT INTO price_data
+                       (company_id, session_id, open_price, high_price, low_price,
+                        close_price, volume, prev_close, percent_change)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (cid, sid, o, h, l, c, v, prev, pct),
                 )
-                pid = self.cur.lastrowid
+                price_id = self.cur.lastrowid
                 self.cur.execute(
-                    "INSERT INTO data_source (price_id, source_name, entered_by, entry_method) VALUES (%s,'OmitNomis/ShareSansarScraper','load_history','archive')",
-                    (pid,),
+                    "INSERT INTO data_source (price_id, source_name, entered_by, entry_method) VALUES (%s,'merolagani.com','load_history','chart_api')",
+                    (price_id,),
                 )
                 self.conn.commit()
                 loaded += 1
             except (mysql.connector.IntegrityError, pymysql.err.IntegrityError):
                 self.conn.rollback()
                 dupes += 1
-            except Exception:
+            except Exception as e:
                 self.conn.rollback()
+                print(f"    DB error {symbol} {d}: {e}")
 
         return loaded, dupes
 
+    def list_symbols_from_db(self):
+        self.cur.execute("SELECT symbol FROM company WHERE is_active=1 ORDER BY symbol")
+        rows = self.cur.fetchall()
+        symbols = [str(r[0]).strip().upper() for r in rows if r and r[0]]
+        return [s for s in symbols if s]
+
+
+def list_symbols_from_csv() -> list[str]:
+    csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nepse_data", "companies.csv")
+    if not os.path.exists(csv_path):
+        return []
+
+    symbols = []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            s = str(row.get("symbol", "")).strip().upper()
+            if s:
+                symbols.append(s)
+    return symbols
+
+
+def resolve_symbols(loader: Loader, symbol: str | None):
+    if symbol:
+        return [symbol.upper().strip()]
+
+    from_db = loader.list_symbols_from_db()
+    if from_db:
+        return from_db
+
+    from_csv = list_symbols_from_csv()
+    if from_csv:
+        return from_csv
+
+    print("No symbols found. Add companies to DB first, or run with --symbol ADBL")
+    return []
+
 
 def main():
-    ap = argparse.ArgumentParser(description="NEPSE historical loader from archive")
+    ap = argparse.ArgumentParser(description="NEPSE historical loader from merolagani chart API")
     ap.add_argument("--from", dest="from_d")
     ap.add_argument("--to", dest="to_d")
     ap.add_argument("--days", type=int)
     ap.add_argument("--symbol", default=None)
-    ap.add_argument("--excel", action="store_true", help="Use combined Excel archive")
+    ap.add_argument("--all", action="store_true", help="Compatibility flag; all symbols are loaded when --symbol is omitted")
     args = ap.parse_args()
 
-    today = date.today().strftime("%Y-%m-%d")
+    to_d = args.to_d or today_iso()
+    if args.from_d:
+        from_d = args.from_d
+    elif args.days:
+        from_d = ago(args.days)
+    else:
+        from_d = ago(180)
+
+    from_ts = to_ts(from_d)
+    to_ts_exclusive = to_ts(to_d) + 86400
+
     loader = Loader()
+    symbols = resolve_symbols(loader, args.symbol)
+    if not symbols:
+        loader.close()
+        sys.exit(1)
+
+    print(f"Range: {from_d} -> {to_d}")
+    print(f"Symbols: {len(symbols)}")
+
     total_loaded = 0
     total_dupes = 0
 
-    if args.excel:
-        if not os.path.exists(EXCEL_LOCAL):
-            r = requests.get(EXCEL_URL, headers=HEADERS, timeout=180)
-            r.raise_for_status()
-            with open(EXCEL_LOCAL, "wb") as f:
-                f.write(r.content)
+    for idx, sym in enumerate(symbols, 1):
+        prefix = f"[{idx:4d}/{len(symbols)}] {sym:<12}"
+        existing = loader.existing_dates(sym, from_d, to_d)
+        rows = fetch_symbol_rows(sym, from_ts, to_ts_exclusive)
+        rows = [r for r in rows if from_d <= r["date"] <= to_d]
 
-        df = load_excel_archive(EXCEL_LOCAL)
-        if args.from_d:
-            df = df[df["date"] >= args.from_d]
-        if args.to_d:
-            df = df[df["date"] <= args.to_d]
-        if args.days:
-            cutoff = (date.today() - timedelta(days=args.days)).strftime("%Y-%m-%d")
-            df = df[df["date"] >= cutoff]
+        if not rows:
+            print(f"{prefix} no data")
+            time.sleep(0.15)
+            continue
 
-        for i, (_, batch) in enumerate(df.groupby("date"), 1):
-            loaded, dupes = loader.insert_df(batch, symbol_filter=args.symbol)
-            total_loaded += loaded
-            total_dupes += dupes
-            if i % 10 == 0 or i == 1:
-                print(f"[{i:4d}] loaded={total_loaded} dupes={total_dupes}")
-    else:
-        if args.days:
-            to_d = today
-            from_d = (date.today() - timedelta(days=args.days)).strftime("%Y-%m-%d")
-        elif args.from_d:
-            from_d = args.from_d
-            to_d = args.to_d or today
-        else:
-            print("Usage: python load_history.py --days 90")
-            print("   or: python load_history.py --from 2025-01-01")
-            print("   or: python load_history.py --excel --from 2025-01-01")
-            loader.close()
-            sys.exit(1)
+        new_rows = [r for r in rows if r["date"] not in existing]
+        if not new_rows:
+            print(f"{prefix} up to date ({len(rows)} days)")
+            time.sleep(0.05)
+            continue
 
-        trading_days = list(date_range(from_d, to_d))
-        print(f"Range: {from_d} -> {to_d}")
-        print(f"Symbol: {args.symbol or 'ALL'}")
-        print(f"Trading days: {len(trading_days)}")
+        loaded, dupes = loader.insert_rows(sym, new_rows)
+        total_loaded += loaded
+        total_dupes += dupes
 
-        for idx, d in enumerate(trading_days, 1):
-            print(f"[{idx:3d}/{len(trading_days)}] {d} ...", end=" ", flush=True)
-            df = fetch_csv_day(d)
-            if df.empty:
-                print("no data")
-                time.sleep(0.2)
-                continue
-
-            loaded, dupes = loader.insert_df(df, symbol_filter=args.symbol)
-            total_loaded += loaded
-            total_dupes += dupes
-
-            sample_symbol = (args.symbol or "ADBL").upper()
-            sample = df[df["symbol"] == sample_symbol]
-            if not sample.empty:
-                r = sample.iloc[0]
-                print(f"ok {loaded} loaded ({dupes} dupes) [{sample_symbol}: C={r.get('close_price', '-')}, H={r.get('high_price', '-')}, V={r.get('volume', '-')}]")
-            else:
-                print(f"ok {loaded} loaded ({dupes} dupes)")
-            time.sleep(0.2)
+        first = min(new_rows, key=lambda r: r["date"])
+        last = max(new_rows, key=lambda r: r["date"])
+        print(
+            f"{prefix} +{loaded} rows "
+            f"[{first['date']} C={first['close']} .. {last['date']} C={last['close']}]"
+        )
+        time.sleep(0.2)
 
     loader.close()
     print("DONE")

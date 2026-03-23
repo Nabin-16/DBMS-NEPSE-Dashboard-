@@ -13,6 +13,13 @@ interface Stock {
     turnover?: number
 }
 
+interface ApiSummary {
+    total_companies?: number
+    total_sessions?: number
+    total_records?: number
+    latest_trading_date?: string | null
+}
+
 export default function DashboardHome() {
     const [stocks, setStocks] = useState<Stock[]>([])
     const [gainers, setGainers] = useState<Stock[]>([])
@@ -20,6 +27,7 @@ export default function DashboardHome() {
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
     const [stats, setStats] = useState({ total_companies: 0, total_dates: 0, total_records: 0 })
+    const [latestDate, setLatestDate] = useState<string | null>(null)
 
     useEffect(() => {
         const initializeDashboard = async () => {
@@ -45,6 +53,7 @@ export default function DashboardHome() {
                 : Array.isArray(payload?.rows)
                     ? payload.rows
                     : []
+            const summary: ApiSummary = payload?.summary ?? {}
 
             const data: Stock[] = rawRows.map((row: any) => ({
                 symbol: String(row.symbol ?? '').toUpperCase(),
@@ -65,10 +74,11 @@ export default function DashboardHome() {
 
             // Calculate stats
             setStats({
-                total_companies: data.length,
-                total_dates: 1, // Latest date only
-                total_records: data.length
+                total_companies: Number(summary.total_companies ?? data.length),
+                total_dates: Number(summary.total_sessions ?? 0),
+                total_records: Number(summary.total_records ?? data.length)
             })
+            setLatestDate(summary.latest_trading_date ?? null)
         } catch (err) {
             setError(err instanceof Error ? err.message : 'An error occurred')
         } finally {
@@ -98,29 +108,30 @@ export default function DashboardHome() {
         <div className="space-y-6 max-w-7xl mx-auto">
             {/* Page Header */}
             <div>
-                <h1 className="text-3xl font-bold text-white">Dashboard</h1>
-                <p className="text-gray-400 mt-1">Monitor market trends and company performance</p>
+                <h1 className="text-2xl sm:text-3xl font-bold text-white">Market Overview</h1>
+                <p className="text-gray-400 mt-1 text-sm">
+                    {stocks.length > 0
+                        ? `${stats.total_companies.toLocaleString()} companies${latestDate ? ` · ${latestDate}` : ''}`
+                        : 'Monitor market trends and company performance'}
+                </p>
             </div>
 
-            <div className="bg-gray-900/40 border border-gray-800 text-gray-300 px-4 py-3 rounded-lg text-sm">
-                Data is loaded from MySQL. Run <span className="font-semibold">npm run pipeline:sync</span> in terminal to refresh from CSV.
+            <div className="bg-gray-900/50 border border-gray-800 text-gray-300 px-4 py-3 rounded-lg text-sm">
+                Data is loaded from MySQL. Use pipeline sync to refresh latest market snapshots.
             </div>
 
             {/* Stats row */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {[
-                    { label: 'Listed companies', value: stats.total_companies.toLocaleString(), icon: '📊' },
-                    { label: 'Trading sessions', value: stats.total_dates.toLocaleString(), icon: '📅' },
-                    { label: 'Price records', value: stats.total_records.toLocaleString(), icon: '💾' },
+                    { label: 'Listed companies', value: stats.total_companies.toLocaleString() },
+                    { label: 'Trading sessions', value: stats.total_dates.toLocaleString() },
+                    { label: 'Price records', value: stats.total_records.toLocaleString() },
                 ].map(s => (
                     <div key={s.label}
-                        className="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 hover:border-emerald-500/30 transition-all">
-                        <div className="flex items-center justify-between">
-                            <div>
-                                <p className="text-gray-400 text-sm mb-1">{s.label}</p>
-                                <p className="text-3xl font-bold text-white">{s.value}</p>
-                            </div>
-                            <span className="text-4xl opacity-20">{s.icon}</span>
+                        className="bg-gradient-to-br from-gray-900 to-gray-900/60 border border-gray-800 rounded-xl p-5 hover:border-emerald-500/30 transition-all">
+                        <div>
+                            <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">{s.label}</p>
+                            <p className="text-3xl font-bold text-white">{s.value}</p>
                         </div>
                     </div>
                 ))}
@@ -132,7 +143,7 @@ export default function DashboardHome() {
                     {/* Top Gainers */}
                     <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
                         <div className="px-6 py-5 border-b border-gray-800 bg-gradient-to-r from-gray-800 to-gray-900">
-                            <h2 className="text-lg font-semibold text-green-400">🔥 Top Gainers</h2>
+                            <h2 className="text-lg font-semibold text-green-400">Top Gainers</h2>
                             <p className="text-xs text-gray-500">Best performing companies</p>
                         </div>
 
@@ -174,7 +185,7 @@ export default function DashboardHome() {
                     {/* Top Losers */}
                     <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
                         <div className="px-6 py-5 border-b border-gray-800 bg-gradient-to-r from-gray-800 to-gray-900">
-                            <h2 className="text-lg font-semibold text-red-400">📉 Top Losers</h2>
+                            <h2 className="text-lg font-semibold text-red-400">Top Losers</h2>
                             <p className="text-xs text-gray-500">Worst performing companies</p>
                         </div>
 
@@ -247,7 +258,7 @@ export default function DashboardHome() {
                                 </tr>
                             </thead>
                             <tbody>
-                                {stocks.slice(0, 20).map((stock) => (
+                                {stocks.map((stock) => (
                                     <tr key={stock.symbol}
                                         className="border-b border-gray-800/50 hover:bg-gray-800/40 transition-colors group">
                                         <td className="px-6 py-4">

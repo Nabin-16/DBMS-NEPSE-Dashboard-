@@ -30,19 +30,9 @@ interface ExpandedItem {
     symbol: string
     data: HistoryData[]
     loading: boolean
-    syncing?: boolean
-    syncError?: string | null
-    syncInfo?: string | null
     availableFrom?: string | null
     availableTo?: string | null
     totalRows?: number
-}
-
-interface DateFilter {
-    fromDate?: string
-    toDate?: string
-    days?: number
-    mode?: 'quick' | 'custom'
 }
 
 function toNumber(value: unknown): number {
@@ -63,7 +53,6 @@ export default function WatchlistPage() {
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
     const [expanded, setExpanded] = useState<Record<string, ExpandedItem>>({})
-    const [filters, setFilters] = useState<Record<string, DateFilter>>({})
 
     useEffect(() => {
         fetchWatchlist()
@@ -100,10 +89,6 @@ export default function WatchlistPage() {
                 return next
             })
         } else {
-            setFilters(prev => ({
-                ...prev,
-                [symbol]: prev[symbol] ?? { mode: 'quick', days: 30 }
-            }))
             setExpanded(prev => ({
                 ...prev,
                 [symbol]: { symbol, data: [], loading: true }
@@ -144,9 +129,6 @@ export default function WatchlistPage() {
                     symbol,
                     data: normalizedRows,
                     loading: false,
-                    syncing: prev[symbol]?.syncing ?? false,
-                    syncError: prev[symbol]?.syncError ?? null,
-                    syncInfo: prev[symbol]?.syncInfo ?? null,
                     availableFrom: result.availableFrom ?? null,
                     availableTo: result.availableTo ?? null,
                     totalRows: Number(result.totalRows ?? normalizedRows.length),
@@ -160,128 +142,12 @@ export default function WatchlistPage() {
                     symbol,
                     data: [],
                     loading: false,
-                    syncing: prev[symbol]?.syncing ?? false,
-                    syncError: prev[symbol]?.syncError ?? null,
-                    syncInfo: prev[symbol]?.syncInfo ?? null,
                     availableFrom: prev[symbol]?.availableFrom ?? null,
                     availableTo: prev[symbol]?.availableTo ?? null,
                     totalRows: prev[symbol]?.totalRows ?? 0,
                 }
             }))
         }
-    }
-
-    const syncAndFetchHistory = async (symbol: string, filter: DateFilter) => {
-        setExpanded(prev => ({
-            ...prev,
-            [symbol]: {
-                ...(prev[symbol] ?? { symbol, data: [], loading: false }),
-                loading: true,
-                syncInfo: null,
-            }
-        }))
-
-        // Always fetch from DB first so chart/table are usable even if pipeline sync fails.
-        await fetchHistoryData(symbol, filter.fromDate, filter.toDate, filter.days ?? 30)
-
-        setExpanded(prev => ({
-            ...prev,
-            [symbol]: {
-                ...(prev[symbol] ?? { symbol, data: [], loading: false }),
-                syncing: true,
-                syncError: null,
-                syncInfo: null,
-            }
-        }))
-
-        try {
-            const res = await fetch(`/api/watchlist/${symbol}/sync`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    fromDate: filter.fromDate,
-                    toDate: filter.toDate,
-                    days: filter.days,
-                })
-            })
-
-            if (!res.ok) {
-                const payload = await res.json().catch(() => ({}))
-                throw new Error(payload.details || payload.error || 'Pipeline sync failed')
-            }
-
-            const payload = await res.json().catch(() => ({}))
-
-            await fetchHistoryData(symbol, filter.fromDate, filter.toDate, filter.days ?? 30)
-
-            setExpanded(prev => ({
-                ...prev,
-                [symbol]: {
-                    ...(prev[symbol] ?? { symbol, data: [], loading: false }),
-                    syncInfo: payload?.hint || payload?.message || 'Synced and refreshed from database',
-                }
-            }))
-        } catch (err) {
-            setExpanded(prev => ({
-                ...prev,
-                [symbol]: {
-                    ...(prev[symbol] ?? { symbol, data: [], loading: false }),
-                    syncing: false,
-                    syncError: null,
-                    syncInfo: `Using database data only. ${err instanceof Error ? err.message : 'Pipeline sync unavailable.'}`,
-                }
-            }))
-            return
-        }
-
-        setExpanded(prev => ({
-            ...prev,
-            [symbol]: {
-                ...(prev[symbol] ?? { symbol, data: [], loading: false }),
-                syncing: false,
-                syncError: null,
-                loading: false,
-            }
-        }))
-    }
-
-    const applyCustomFilter = (symbol: string) => {
-        const filter = filters[symbol] ?? {}
-        syncAndFetchHistory(symbol, {
-            mode: 'custom',
-            fromDate: filter.fromDate,
-            toDate: filter.toDate,
-            days: filter.days ?? 30,
-        })
-    }
-
-    const applyPresetFilter = (symbol: string, days: number) => {
-        setFilters(prev => ({
-            ...prev,
-            [symbol]: {
-                mode: 'quick',
-                fromDate: undefined,
-                toDate: undefined,
-                days,
-            },
-        }))
-        syncAndFetchHistory(symbol, {
-            mode: 'quick',
-            days,
-        })
-    }
-
-    const getFilterLabel = (symbol: string) => {
-        const filter = filters[symbol]
-        const meta = expanded[symbol]
-        if ((meta?.totalRows ?? 0) <= 1 && meta?.availableTo && !filter?.fromDate && !filter?.toDate) {
-            return `Latest available: ${meta.availableTo}`
-        }
-        if (!filter) return 'Last 30 days'
-        if (filter.mode === 'quick') return `Last ${filter.days ?? 30} days`
-        if (filter.fromDate && filter.toDate) return `${filter.fromDate} to ${filter.toDate}`
-        if (filter.fromDate) return `From ${filter.fromDate}`
-        return `Last ${filter.days ?? 30} days`
     }
 
     const removeFromWatchlist = async (symbol: string) => {
@@ -442,132 +308,6 @@ export default function WatchlistPage() {
                                 {/* Expanded History Section */}
                                 {isExpanded && (
                                     <div className="border-t border-gray-800 bg-gray-950/50 p-4">
-                                        <div className="mb-4">
-                                            <label className="block text-xs text-gray-400 mb-2">Date Range Filter</label>
-                                            <div className="flex items-center gap-2 mb-3">
-                                                <button
-                                                    onClick={() => setFilters(prev => ({
-                                                        ...prev,
-                                                        [item.symbol]: {
-                                                            ...prev[item.symbol],
-                                                            mode: 'quick',
-                                                            fromDate: undefined,
-                                                            toDate: undefined,
-                                                            days: prev[item.symbol]?.days ?? 30,
-                                                        }
-                                                    }))}
-                                                    className={`text-xs px-2.5 py-1 rounded border ${(filters[item.symbol]?.mode ?? 'quick') === 'quick'
-                                                        ? 'bg-emerald-700/30 border-emerald-600 text-emerald-300'
-                                                        : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700'
-                                                        }`}
-                                                >
-                                                    Quick
-                                                </button>
-                                                <button
-                                                    onClick={() => setFilters(prev => ({
-                                                        ...prev,
-                                                        [item.symbol]: {
-                                                            ...prev[item.symbol],
-                                                            mode: 'custom',
-                                                            days: undefined,
-                                                        }
-                                                    }))}
-                                                    className={`text-xs px-2.5 py-1 rounded border ${(filters[item.symbol]?.mode ?? 'quick') === 'custom'
-                                                        ? 'bg-emerald-700/30 border-emerald-600 text-emerald-300'
-                                                        : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700'
-                                                        }`}
-                                                >
-                                                    Custom
-                                                </button>
-                                                <span className="text-[11px] text-gray-500 ml-1">
-                                                    Active: {getFilterLabel(item.symbol)}
-                                                </span>
-                                                {expandData?.syncing && (
-                                                    <span className="text-[11px] text-amber-300 ml-1">Syncing pipeline...</span>
-                                                )}
-                                            </div>
-
-                                            {(filters[item.symbol]?.mode ?? 'quick') === 'quick' ? (
-                                                <div className="flex flex-wrap items-center gap-2 mb-3">
-                                                    {[30, 90, 180].map((days) => (
-                                                        <button
-                                                            key={days}
-                                                            onClick={() => applyPresetFilter(item.symbol, days)}
-                                                            className={`text-xs px-2.5 py-1 rounded border transition-colors ${(filters[item.symbol]?.days ?? 30) === days && !filters[item.symbol]?.fromDate
-                                                                ? 'bg-emerald-700/30 border-emerald-600 text-emerald-300'
-                                                                : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700'
-                                                                }`}
-                                                        >
-                                                            {days}D
-                                                        </button>
-                                                    ))}
-                                                    {(expandData?.totalRows ?? 0) <= 1 && (
-                                                        <span className="text-[11px] text-gray-500 ml-1">
-                                                            Only today data exists in DB right now.
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            ) : (
-                                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                                                    <input
-                                                        type="date"
-                                                        placeholder="From date"
-                                                        value={filters[item.symbol]?.fromDate ?? ''}
-                                                        min={expandData?.availableFrom ?? undefined}
-                                                        max={expandData?.availableTo ?? undefined}
-                                                        onChange={(e) => setFilters(prev => ({
-                                                            ...prev,
-                                                            [item.symbol]: {
-                                                                ...prev[item.symbol],
-                                                                fromDate: e.target.value || undefined,
-                                                            }
-                                                        }))}
-                                                        className="text-xs px-2 py-1.5 bg-gray-800 border border-gray-700 text-white rounded placeholder-gray-600"
-                                                    />
-                                                    <input
-                                                        type="date"
-                                                        placeholder="To date"
-                                                        value={filters[item.symbol]?.toDate ?? ''}
-                                                        min={expandData?.availableFrom ?? undefined}
-                                                        max={expandData?.availableTo ?? undefined}
-                                                        onChange={(e) => setFilters(prev => ({
-                                                            ...prev,
-                                                            [item.symbol]: {
-                                                                ...prev[item.symbol],
-                                                                toDate: e.target.value || undefined,
-                                                            }
-                                                        }))}
-                                                        className="text-xs px-2 py-1.5 bg-gray-800 border border-gray-700 text-white rounded placeholder-gray-600"
-                                                    />
-                                                    <div className="flex gap-2">
-                                                        <button
-                                                            onClick={() => applyCustomFilter(item.symbol)}
-                                                            className="text-xs px-2 py-1.5 bg-blue-700 hover:bg-blue-600 text-white rounded transition-colors"
-                                                        >
-                                                            Apply
-                                                        </button>
-                                                        <button
-                                                            onClick={() => {
-                                                                setFilters(prev => ({ ...prev, [item.symbol]: { mode: 'quick', days: 30 } }))
-                                                                syncAndFetchHistory(item.symbol, { mode: 'quick', days: 30 })
-                                                            }}
-                                                            className="text-xs px-2 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded transition-colors"
-                                                        >
-                                                            Clear
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        {expandData?.syncError && (
-                                            <p className="text-xs text-red-400 mb-3">{expandData.syncError}</p>
-                                        )}
-
-                                        {expandData?.syncInfo && (
-                                            <p className="text-xs text-amber-300 mb-3">{expandData.syncInfo}</p>
-                                        )}
-
                                         {expandData?.loading ? (
                                             <div className="p-4 text-center text-gray-500 text-xs">
                                                 <div className="inline-block w-4 h-4 border-2 border-gray-700 border-t-emerald-500 rounded-full animate-spin"></div>
@@ -578,17 +318,22 @@ export default function WatchlistPage() {
                                             <div className="space-y-4">
                                                 <PriceChart
                                                     title="Price vs Date"
-                                                    data={expandData.data.map((record) => ({
-                                                        name: record.trading_date,
+                                                    symbol={item.symbol}
+                                                    initialData={expandData.data.map((record) => ({
+                                                        date: record.trading_date,
                                                         open: toNumber(record.open_price),
                                                         high: toNumber(record.high_price),
                                                         low: toNumber(record.low_price),
                                                         close: toNumber(record.close_price),
                                                         volume: toNumber(record.volume),
                                                     }))}
+                                                    onRangeChange={(range) => {
+                                                        void fetchHistoryData(item.symbol, range.from, range.to, range.days ?? 30)
+                                                    }}
                                                 />
 
                                                 <div className="overflow-x-auto">
+                                                    <p className="text-xs text-gray-500 mb-2">Price history list</p>
                                                     <table className="w-full text-xs">
                                                         <thead>
                                                             <tr className="border-b border-gray-700 text-gray-500">

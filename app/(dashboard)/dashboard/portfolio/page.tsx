@@ -1,7 +1,6 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import Link from 'next/link'
 import WatchlistPopup from '@/components/WatchlistPopup'
 
 interface CompanyMetrics {
@@ -29,10 +28,22 @@ function fmt2(value: unknown): string {
     return toNumber(value).toFixed(2)
 }
 
+function fmtCurrency(value: unknown): string {
+    const n = toNumber(value)
+    if (!Number.isFinite(n) || n <= 0) return '—'
+    return `Rs. ${n.toLocaleString('en-NP', { maximumFractionDigits: 2 })}`
+}
+
+function safePct(num: number, den: number): number | null {
+    if (!Number.isFinite(num) || !Number.isFinite(den) || den === 0) return null
+    return (num / den) * 100
+}
+
 export default function PortfolioPage() {
     const [companies, setCompanies] = useState<CompanyMetrics[]>([])
     const [query, setQuery] = useState('')
     const [isOpen, setIsOpen] = useState(false)
+    const [activeIndex, setActiveIndex] = useState(0)
     const [selectedCompany, setSelectedCompany] = useState('')
     const [selectedMetrics, setSelectedMetrics] = useState<CompanyMetrics | null>(null)
     const [loading, setLoading] = useState(true)
@@ -71,7 +82,7 @@ export default function PortfolioPage() {
                 if (normalized.length > 0) {
                     setSelectedCompany(normalized[0].symbol)
                     setSelectedMetrics(normalized[0])
-                    setQuery(`${normalized[0].symbol} - ${normalized[0].company_name}`)
+                    setQuery(normalized[0].symbol)
                 }
             } catch (err) {
                 setError(err instanceof Error ? err.message : 'Error loading companies')
@@ -88,7 +99,7 @@ export default function PortfolioPage() {
         const company = companies.find(c => c.symbol === symbol)
         if (company) {
             setSelectedMetrics(company)
-            setQuery(`${company.symbol} - ${company.company_name}`)
+            setQuery(company.symbol)
             setIsOpen(false)
         }
     }
@@ -96,8 +107,33 @@ export default function PortfolioPage() {
     const filteredCompanies = companies.filter((company) => {
         const q = query.trim().toLowerCase()
         if (!q) return true
-        return company.symbol.toLowerCase().includes(q) || company.company_name.toLowerCase().includes(q)
+        return (
+            company.symbol.toLowerCase().includes(q) ||
+            company.company_name.toLowerCase().includes(q) ||
+            company.sector_name.toLowerCase().includes(q)
+        )
     })
+
+    const topMatches = filteredCompanies.slice(0, 80)
+
+    const closePrice = selectedMetrics ? (selectedMetrics.close_price ?? selectedMetrics.last_price ?? null) : null
+    const openPrice = selectedMetrics?.open_price ?? null
+    const highPrice = selectedMetrics?.high_price ?? null
+    const lowPrice = selectedMetrics?.low_price ?? null
+    const prevClose = selectedMetrics?.prev_close ?? null
+
+    const dayRange = highPrice != null && lowPrice != null ? highPrice - lowPrice : null
+    const intradayVolPct = openPrice != null && dayRange != null ? safePct(dayRange, openPrice) : null
+    const gapPct = closePrice != null && prevClose != null ? safePct(closePrice - prevClose, prevClose) : null
+    const highDistancePct = closePrice != null && highPrice != null ? safePct(highPrice - closePrice, highPrice) : null
+    const lowDistancePct = closePrice != null && lowPrice != null ? safePct(closePrice - lowPrice, lowPrice) : null
+
+    function selectNextCompany() {
+        if (!selectedMetrics || companies.length === 0) return
+        const idx = companies.findIndex((c) => c.symbol === selectedMetrics.symbol)
+        const next = companies[(idx + 1 + companies.length) % companies.length]
+        handleCompanyChange(next.symbol)
+    }
 
     if (loading) {
         return (
@@ -124,17 +160,55 @@ export default function PortfolioPage() {
                     Select Company
                 </label>
                 <div className="relative">
+                    <svg className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z" />
+                    </svg>
                     <input
-                        type="text"
+                        type="search"
                         value={query}
                         onChange={(e) => {
                             setQuery(e.target.value)
                             setIsOpen(true)
+                            setActiveIndex(0)
                         }}
                         onFocus={() => setIsOpen(true)}
+                        onKeyDown={(e) => {
+                            if (!isOpen || !topMatches.length) return
+                            if (e.key === 'ArrowDown') {
+                                e.preventDefault()
+                                setActiveIndex((idx) => (idx + 1) % topMatches.length)
+                            } else if (e.key === 'ArrowUp') {
+                                e.preventDefault()
+                                setActiveIndex((idx) => (idx <= 0 ? topMatches.length - 1 : idx - 1))
+                            } else if (e.key === 'Enter') {
+                                e.preventDefault()
+                                const selected = topMatches[activeIndex]
+                                if (selected) handleCompanyChange(selected.symbol)
+                            } else if (e.key === 'Escape') {
+                                setIsOpen(false)
+                            }
+                        }}
+                        onBlur={() => {
+                            setTimeout(() => setIsOpen(false), 120)
+                        }}
                         placeholder="Search by symbol or company name"
-                        className="w-full rounded-lg border border-gray-700 bg-gray-800 px-4 py-3 text-white text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition-all"
+                        className="w-full rounded-xl border border-gray-700 bg-gray-800 pl-11 pr-20 py-3 text-white text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition-all"
                     />
+                    {query && (
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setQuery('')
+                                setIsOpen(true)
+                            }}
+                            className="absolute right-12 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
+                            aria-label="Clear search"
+                        >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18 18 6M6 6l12 12" />
+                            </svg>
+                        </button>
+                    )}
                     <button
                         type="button"
                         onClick={() => setIsOpen((v) => !v)}
@@ -142,23 +216,34 @@ export default function PortfolioPage() {
                         aria-label="Toggle company list"
                     >
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m6 9 6 6 6-6" />
                         </svg>
                     </button>
                     {isOpen && (
-                        <div className="absolute z-20 mt-2 w-full rounded-lg border border-gray-700 bg-gray-900 shadow-xl max-h-72 overflow-y-auto">
-                            {filteredCompanies.length === 0 ? (
+                        <div className="absolute z-20 mt-2 w-full rounded-xl border border-gray-700 bg-gray-900 shadow-xl max-h-80 overflow-y-auto">
+                            {topMatches.length === 0 ? (
                                 <p className="px-4 py-3 text-sm text-gray-500">No company found</p>
                             ) : (
-                                filteredCompanies.slice(0, 50).map((company) => (
+                                topMatches.map((company, idx) => (
                                     <button
                                         key={company.symbol}
                                         type="button"
                                         onClick={() => handleCompanyChange(company.symbol)}
-                                        className={`w-full text-left px-4 py-2.5 hover:bg-gray-800 transition-colors ${selectedCompany === company.symbol ? 'bg-emerald-900/20' : ''}`}
+                                        onMouseEnter={() => setActiveIndex(idx)}
+                                        className={`w-full text-left px-4 py-3 border-b border-gray-800/70 last:border-b-0 transition-colors ${(selectedCompany === company.symbol || activeIndex === idx) ? 'bg-emerald-900/20' : 'hover:bg-gray-800'}`}
                                     >
-                                        <p className="text-sm text-white font-medium">{company.symbol}</p>
-                                        <p className="text-xs text-gray-400 truncate">{company.company_name}</p>
+                                        <div className="flex items-center justify-between gap-3">
+                                            <div className="min-w-0">
+                                                <p className="text-sm text-white font-medium">{company.symbol} <span className="text-gray-400 font-normal">- {company.company_name}</span></p>
+                                                <p className="text-xs text-gray-500 truncate">{company.sector_name}</p>
+                                            </div>
+                                            <div className="text-right shrink-0">
+                                                <p className="text-xs text-gray-300">{fmtCurrency(company.close_price ?? company.last_price)}</p>
+                                                <p className={`text-[11px] ${(company.change_percent ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                                    {(company.change_percent ?? 0) >= 0 ? '↑' : '↓'} {fmt2(Math.abs(company.change_percent ?? 0))}%
+                                                </p>
+                                            </div>
+                                        </div>
                                     </button>
                                 ))
                             )}
@@ -166,7 +251,7 @@ export default function PortfolioPage() {
                     )}
                 </div>
                 <p className="text-xs text-gray-500 mt-2">
-                    Showing {filteredCompanies.length} of {companies.length} companies
+                    Showing {topMatches.length} of {companies.length} companies
                 </p>
             </div>
 
@@ -231,12 +316,12 @@ export default function PortfolioPage() {
 
                         {/* Stats Grid */}
                         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 pt-6 border-t border-gray-700">
-                            <StatCard label="LTP" value={`Rs. ${selectedMetrics.last_price?.toLocaleString('en-NP', { maximumFractionDigits: 2 }) || '—'}`} icon="📊" />
-                            <StatCard label="Open" value={`Rs. ${selectedMetrics.open_price?.toLocaleString('en-NP', { maximumFractionDigits: 2 }) || '—'}`} icon="🔓" />
-                            <StatCard label="High" value={`Rs. ${selectedMetrics.high_price?.toLocaleString('en-NP', { maximumFractionDigits: 2 }) || '—'}`} icon="📈" />
-                            <StatCard label="Low" value={`Rs. ${selectedMetrics.low_price?.toLocaleString('en-NP', { maximumFractionDigits: 2 }) || '—'}`} icon="📉" />
-                            <StatCard label="Pr. Close" value={`Rs. ${selectedMetrics.prev_close?.toLocaleString('en-NP', { maximumFractionDigits: 2 }) || '—'}`} icon="🔚" />
-                            <StatCard label="Turnover" value={selectedMetrics.turnover ? `Rs. ${Number(selectedMetrics.turnover).toLocaleString('en-NP')}` : '—'} icon="💰" />
+                            <StatCard label="Open" value={fmtCurrency(selectedMetrics.open_price)} icon="⏺" />
+                            <StatCard label="High" value={fmtCurrency(selectedMetrics.high_price)} icon="▲" />
+                            <StatCard label="Low" value={fmtCurrency(selectedMetrics.low_price)} icon="▼" />
+                            <StatCard label="Pr. Close" value={fmtCurrency(selectedMetrics.prev_close)} icon="↩" />
+                            <StatCard label="Day Range" value={dayRange != null ? fmtCurrency(dayRange) : '—'} icon="↔" />
+                            <StatCard label="Gap vs Prev" value={gapPct != null ? `${gapPct >= 0 ? '+' : ''}${fmt2(gapPct)}%` : '—'} icon="Δ" />
                         </div>
                     </div>
 
@@ -248,6 +333,18 @@ export default function PortfolioPage() {
                                 <div className="flex justify-between items-center py-2 border-b border-gray-700">
                                     <span className="text-gray-500 text-sm">Volume</span>
                                     <span className="text-white font-medium">{selectedMetrics.volume?.toLocaleString() || '—'}</span>
+                                </div>
+                                <div className="flex justify-between items-center py-2 border-b border-gray-700">
+                                    <span className="text-gray-500 text-sm">Intraday Volatility</span>
+                                    <span className="text-white font-medium">{intradayVolPct != null ? `${fmt2(intradayVolPct)}%` : '—'}</span>
+                                </div>
+                                <div className="flex justify-between items-center py-2 border-b border-gray-700">
+                                    <span className="text-gray-500 text-sm">Distance from Day High</span>
+                                    <span className="text-white font-medium">{highDistancePct != null ? `${fmt2(highDistancePct)}%` : '—'}</span>
+                                </div>
+                                <div className="flex justify-between items-center py-2 border-b border-gray-700">
+                                    <span className="text-gray-500 text-sm">Distance from Day Low</span>
+                                    <span className="text-white font-medium">{lowDistancePct != null ? `${fmt2(lowDistancePct)}%` : '—'}</span>
                                 </div>
                                 <div className="flex justify-between items-center py-2">
                                     <span className="text-gray-500 text-sm">Last Updated</span>
@@ -261,17 +358,22 @@ export default function PortfolioPage() {
                         </div>
 
                         <div className="bg-gray-900 border border-gray-800 rounded-xl p-6">
-                            <h3 className="text-sm font-medium text-gray-300 mb-4">Quick Actions</h3>
-                            <div className="space-y-2">
-                                <Link href={`/dashboard/stock/${selectedMetrics.symbol}`}
-                                    className="w-full px-4 py-2 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-emerald-400 hover:bg-emerald-500/30 transition-colors text-sm font-medium text-center">
-                                    View Detailed Chart
-                                </Link>
+                            <h3 className="text-sm font-medium text-gray-200 mb-4">Quick Actions</h3>
+                            <p className="text-xs text-gray-500 mb-4">Simple actions for faster review workflow.</p>
+
+                            <div className="space-y-2.5">
                                 <button
                                     onClick={() => setShowWatchlistPopup(true)}
-                                    className="w-full px-4 py-2 rounded-lg bg-blue-500/20 border border-blue-500/50 text-blue-400 hover:bg-blue-500/30 transition-colors text-sm font-medium"
+                                    className="w-full px-4 py-3 rounded-xl bg-gradient-to-r from-blue-600/25 to-blue-500/10 border border-blue-500/40 text-blue-200 hover:border-blue-400 transition-colors text-sm font-semibold text-left"
                                 >
                                     Add to Watchlist
+                                </button>
+
+                                <button
+                                    onClick={selectNextCompany}
+                                    className="w-full px-4 py-3 rounded-xl bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25 transition-colors text-sm font-semibold text-left"
+                                >
+                                    Next Company
                                 </button>
                             </div>
                         </div>

@@ -11,7 +11,7 @@ export default function WatchlistFetchBanner({ symbol }: Props) {
     const router = useRouter()
     const [phase, setPhase] = useState<'fetching' | 'done' | 'error'>('fetching')
     const [loaded, setLoaded] = useState(0)
-    const [msg, setMsg] = useState(`Fetching 30 days of ${symbol} price history from archive...`)
+    const [msg, setMsg] = useState(`Syncing 30 days of ${symbol} price history from live chart API...`)
 
     useEffect(() => {
         let cancelled = false
@@ -19,7 +19,7 @@ export default function WatchlistFetchBanner({ symbol }: Props) {
         async function run() {
             try {
                 setPhase('fetching')
-                setMsg(`Downloading ${symbol} price history from NEPSE archive...`)
+                setMsg(`Downloading ${symbol} price history from live chart API...`)
 
                 const res = await fetch('/api/auto-fetch', {
                     method: 'POST',
