@@ -1,7 +1,7 @@
 """
 NEPSE Historical Loader
 ======================
-Fetches OHLCV history from merolagani chart API and synchronizes it to nepse_db.
+Fetches OHLCV history from merolagani chart and synchronizes it to nepse_db.
 
 Usage:
     python load_history.py --days 90

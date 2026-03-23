@@ -54,21 +54,13 @@ function getMarketStatus(): MarketStatus {
 
 export default function MarketStatusBadge() {
     const [status, setStatus] = useState<MarketStatus | null>(null)
-    const [syncing, setSyncing] = useState(false)
-    const [syncMsg, setSyncMsg] = useState('')
 
     useEffect(() => {
         const s = getMarketStatus()
         setStatus(s)
 
         const key = `nepse_synced_${s.lastTradingDay}`
-        if (localStorage.getItem(key)) {
-            setSyncMsg(`Data synced for ${s.lastTradingDay}`)
-            return
-        }
-
-        setSyncing(true)
-        setSyncMsg('Syncing market data...')
+        if (localStorage.getItem(key)) return
 
         fetch('/api/auto-fetch', {
             method: 'POST',
@@ -77,19 +69,9 @@ export default function MarketStatusBadge() {
         })
             .then((r) => r.json())
             .then((d) => {
-                setSyncing(false)
-                if (Number(d?.loaded ?? 0) > 0) {
-                    setSyncMsg(`Synced ${Number(d.loaded)} companies for ${s.lastTradingDay}`)
-                } else {
-                    setSyncMsg(`Data up to date for ${s.lastTradingDay}`)
-                }
                 localStorage.setItem(key, '1')
-                setTimeout(() => setSyncMsg(''), 5000)
             })
-            .catch(() => {
-                setSyncing(false)
-                setSyncMsg('')
-            })
+            .catch(() => { })
     }, [])
 
     if (!status) return null
@@ -111,17 +93,6 @@ export default function MarketStatusBadge() {
                 {status.label}
             </div>
 
-            {(syncing || syncMsg) && (
-                <div className="flex items-center gap-1.5 text-xs text-gray-500">
-                    {syncing && (
-                        <svg className="animate-spin w-3 h-3" fill="none" viewBox="0 0 24 24">
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                        </svg>
-                    )}
-                    <span className={syncing ? 'text-amber-400' : 'text-emerald-400/70'}>{syncMsg}</span>
-                </div>
-            )}
         </div>
     )
 }

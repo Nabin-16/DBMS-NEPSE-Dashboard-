@@ -1,8 +1,3 @@
--- ═══════════════════════════════════════════════════════
---  NEPSE Dashboard  —  Database Setup
---  Run this entire file in MySQL Workbench or mysql CLI
---  mysql -u root -p < setup_databases.sql
--- ═══════════════════════════════════════════════════════
 
 
 -- ── 1. AUTH DATABASE ─────────────────────────────────────

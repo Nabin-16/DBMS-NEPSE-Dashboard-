@@ -1,10 +1,12 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
-import PriceChart from '@/components/PriceChart'
-import WatchlistFetchBanner from '@/components/WatchlistFetchBanner'
+import {
+    AreaChart, Area, XAxis, YAxis, CartesianGrid,
+    Tooltip, ResponsiveContainer, ComposedChart, Bar
+} from 'recharts'
 
 interface WatchlistItem {
     watchlist_id: number
@@ -16,201 +18,303 @@ interface WatchlistItem {
     trading_date?: string
 }
 
-interface HistoryData {
-    trading_date: string
-    open_price: number
-    high_price: number
-    low_price: number
-    close_price: number
-    volume: number
-    percent_change: number
+interface PriceRow {
+    date: string
+    open: number; high: number; low: number; close: number
+    volume: number; percent_change: number
 }
 
-interface ExpandedItem {
-    symbol: string
-    data: HistoryData[]
-    loading: boolean
-    availableFrom?: string | null
-    availableTo?: string | null
-    totalRows?: number
+// ── Module-level history cache ────────────────────────────────────────────────
+const _cache = new Map<string, { rows: PriceRow[]; ts: number }>()
+const TTL = 5 * 60_000
+
+function cKey(sym: string, days: number) { return `${sym}:${days}` }
+function cGet(k: string) {
+    const e = _cache.get(k)
+    if (!e || Date.now() - e.ts > TTL) { _cache.delete(k); return null }
+    return e.rows
+}
+function cSet(k: string, rows: PriceRow[]) {
+    if (_cache.size > 300) { const f = _cache.keys().next().value; if (f) _cache.delete(f) }
+    _cache.set(k, { rows, ts: Date.now() })
 }
 
-function toNumber(value: unknown): number {
-    const n = Number(value)
-    return Number.isFinite(n) ? n : 0
+function toN(v: unknown) { const n = Number(v); return Number.isFinite(n) ? n : 0 }
+function fmt2(v: unknown) { return toN(v).toFixed(2) }
+function daysAgo(n: number) {
+    const d = new Date(); d.setDate(d.getDate() - n)
+    return d.toISOString().split('T')[0]
+}
+function todayStr() { return new Date().toISOString().split('T')[0] }
+function fmtDate(s: string) {
+    return new Date(s).toLocaleDateString('en-NP', { month: 'short', day: 'numeric' })
+}
+function fmtVol(v: number) {
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`
+    if (v >= 1_000) return `${(v / 1_000).toFixed(0)}K`
+    return v.toLocaleString()
 }
 
-function fmt2(value: unknown): string {
-    return toNumber(value).toFixed(2)
-}
+// ── Inline chart (self-contained, no PriceChart dependency) ──────────────────
+function MiniChart({ rows, symbol }: { rows: PriceRow[]; symbol: string }) {
+    if (rows.length < 2) return null
+    const isUp = rows[rows.length - 1].close >= rows[0].close
+    const color = isUp ? '#10b981' : '#f87171'
 
-export default function WatchlistPage() {
-    const searchParams = useSearchParams()
-    const fetchingSym = (searchParams.get('fetching') ?? '').toUpperCase()
-    const highlightSym = (searchParams.get('sym') ?? '').toUpperCase()
-
-    const [items, setItems] = useState<WatchlistItem[]>([])
-    const [loading, setLoading] = useState(true)
-    const [error, setError] = useState<string | null>(null)
-    const [expanded, setExpanded] = useState<Record<string, ExpandedItem>>({})
-
-    useEffect(() => {
-        fetchWatchlist()
-    }, [])
-
-    const fetchWatchlist = async () => {
-        try {
-            const res = await fetch('/api/watchlist')
-            if (!res.ok) throw new Error('Failed to fetch watchlist')
-            const payload = await res.json()
-            const data = Array.isArray(payload) ? payload : []
-            const normalized: WatchlistItem[] = data.map((item: any) => ({
-                watchlist_id: Number(item.watchlist_id ?? 0),
-                symbol: String(item.symbol ?? ''),
-                name: String(item.name ?? ''),
-                sector: item.sector ?? undefined,
-                close_price: item.close_price == null ? undefined : toNumber(item.close_price),
-                percent_change: item.percent_change == null ? undefined : toNumber(item.percent_change),
-                trading_date: item.trading_date ?? undefined,
-            }))
-            setItems(normalized)
-        } catch (err) {
-            setError(err instanceof Error ? err.message : 'An error occurred')
-        } finally {
-            setLoading(false)
-        }
-    }
-
-    const toggleExpand = async (symbol: string) => {
-        if (expanded[symbol]) {
-            setExpanded(prev => {
-                const next = { ...prev }
-                delete next[symbol]
-                return next
-            })
-        } else {
-            setExpanded(prev => ({
-                ...prev,
-                [symbol]: { symbol, data: [], loading: true }
-            }))
-            await fetchHistoryData(symbol)
-        }
-    }
-
-    const fetchHistoryData = async (symbol: string, fromDate?: string, toDate?: string, days = 30) => {
-        try {
-            let url = `/api/watchlist/${symbol}/history?days=${days}`
-            if (fromDate && toDate) {
-                url = `/api/watchlist/${symbol}/history?fromDate=${fromDate}&toDate=${toDate}`
-            } else if (fromDate) {
-                url = `/api/watchlist/${symbol}/history?fromDate=${fromDate}`
-            } else if (toDate) {
-                url = `/api/watchlist/${symbol}/history?toDate=${toDate}&days=${days}`
-            }
-
-            const res = await fetch(url)
-            if (!res.ok) throw new Error('Failed to fetch history')
-            const result = await res.json()
-            const normalizedRows: HistoryData[] = Array.isArray(result.data)
-                ? result.data.map((record: any) => ({
-                    trading_date: String(record.trading_date ?? ''),
-                    open_price: toNumber(record.open_price),
-                    high_price: toNumber(record.high_price),
-                    low_price: toNumber(record.low_price),
-                    close_price: toNumber(record.close_price),
-                    volume: toNumber(record.volume),
-                    percent_change: toNumber(record.percent_change),
-                }))
-                : []
-
-            setExpanded(prev => ({
-                ...prev,
-                [symbol]: {
-                    symbol,
-                    data: normalizedRows,
-                    loading: false,
-                    availableFrom: result.availableFrom ?? null,
-                    availableTo: result.availableTo ?? null,
-                    totalRows: Number(result.totalRows ?? normalizedRows.length),
-                }
-            }))
-        } catch (err) {
-            console.error('History fetch error:', err)
-            setExpanded(prev => ({
-                ...prev,
-                [symbol]: {
-                    symbol,
-                    data: [],
-                    loading: false,
-                    availableFrom: prev[symbol]?.availableFrom ?? null,
-                    availableTo: prev[symbol]?.availableTo ?? null,
-                    totalRows: prev[symbol]?.totalRows ?? 0,
-                }
-            }))
-        }
-    }
-
-    const removeFromWatchlist = async (symbol: string) => {
-        try {
-            const res = await fetch('/api/watchlist', {
-                method: 'DELETE',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ symbol })
-            })
-            if (res.ok) {
-                setItems(prev => prev.filter(item => item.symbol !== symbol))
-            }
-        } catch (err) {
-            console.error('Remove error:', err)
-        }
-    }
-
-    if (loading) {
+    const Tip = ({ active, payload, label }: any) => {
+        if (!active || !payload?.length) return null
+        const d = payload[0]?.payload
         return (
-            <div className="max-w-5xl mx-auto p-8 text-center">
-                <div className="inline-block">
-                    <div className="w-8 h-8 border-4 border-gray-700 border-t-emerald-500 rounded-full animate-spin"></div>
+            <div className="bg-gray-900 border border-gray-700 rounded-lg p-3 text-xs shadow-xl min-w-[150px]">
+                <p className="text-gray-400 mb-2 font-medium">{fmtDate(String(label ?? ''))}</p>
+                {(['open', 'high', 'low', 'close'] as const).map((k, i) => (
+                    <div key={k} className="flex justify-between gap-4 mb-0.5">
+                        <span className="text-gray-500 capitalize">{k}</span>
+                        <span className={`font-medium ${k === 'high' ? 'text-emerald-400' : k === 'low' ? 'text-red-400' : 'text-white'
+                            }`}>Rs. {Number(d?.[k] ?? 0).toLocaleString()}</span>
+                    </div>
+                ))}
+                <div className="border-t border-gray-700 mt-2 pt-2 flex justify-between">
+                    <span className="text-gray-500">Volume</span>
+                    <span className="text-gray-300">{fmtVol(Number(d?.volume ?? 0))}</span>
                 </div>
-                <p className="text-gray-500 mt-4">Loading watchlist...</p>
-            </div>
-        )
-    }
-
-    if (error) {
-        return (
-            <div className="max-w-5xl mx-auto p-8 text-center">
-                <p className="text-red-400">{error}</p>
-                <button
-                    onClick={() => {
-                        setError(null)
-                        setLoading(true)
-                        fetchWatchlist()
-                    }}
-                    className="mt-4 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700"
-                >
-                    Retry
-                </button>
+                {d?.percent_change != null && (
+                    <div className="flex justify-between mt-1">
+                        <span className="text-gray-500">Change</span>
+                        <span className={d.percent_change >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                            {d.percent_change >= 0 ? '+' : ''}{toN(d.percent_change).toFixed(2)}%
+                        </span>
+                    </div>
+                )}
             </div>
         )
     }
 
     return (
+        <div className="space-y-3">
+            <ResponsiveContainer width="100%" height={200} minWidth={0}>
+                <AreaChart data={rows} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                    <defs>
+                        <linearGradient id={`g-${symbol}`} x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor={color} stopOpacity={0.25} />
+                            <stop offset="95%" stopColor={color} stopOpacity={0} />
+                        </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+                    <XAxis dataKey="date" tickFormatter={fmtDate}
+                        tick={{ fill: '#6b7280', fontSize: 10 }}
+                        axisLine={false} tickLine={false} interval="preserveStartEnd" />
+                    <YAxis domain={['auto', 'auto']}
+                        tick={{ fill: '#6b7280', fontSize: 10 }}
+                        axisLine={false} tickLine={false}
+                        tickFormatter={v => `Rs.${Number(v).toLocaleString()}`} width={80} />
+                    <Tooltip content={<Tip />} />
+                    <Area type="monotone" dataKey="close" stroke={color} strokeWidth={1.5}
+                        fill={`url(#g-${symbol})`} dot={false} activeDot={{ r: 3, fill: color }} />
+                </AreaChart>
+            </ResponsiveContainer>
+
+            <ResponsiveContainer width="100%" height={60} minWidth={0}>
+                <ComposedChart data={rows} margin={{ top: 0, right: 4, left: 0, bottom: 0 }}>
+                    <XAxis dataKey="date" hide />
+                    <YAxis tick={{ fill: '#6b7280', fontSize: 9 }} axisLine={false} tickLine={false}
+                        width={80} tickFormatter={v => fmtVol(Number(v))} />
+                    <Bar dataKey="volume" fill="#374151" radius={[2, 2, 0, 0]} />
+                    <Tooltip
+                        contentStyle={{ background: '#111827', border: '1px solid #374151', borderRadius: '8px', fontSize: 11 }}
+                        formatter={(v: any) => [fmtVol(Number(v)), 'Volume']}
+                        labelFormatter={l => fmtDate(String(l))} />
+                </ComposedChart>
+            </ResponsiveContainer>
+        </div>
+    )
+}
+
+// ── State per expanded symbol ────────────────────────────────────────────────
+interface ExpandState {
+    open: boolean
+    days: number   // 30 | 90 | 180 | 0=custom
+    rows: PriceRow[]
+    loading: boolean
+    customFrom: string
+    customTo: string
+    loaded: boolean   // first load done
+}
+function mkExp(): ExpandState {
+    return { open: false, days: 30, rows: [], loading: false, customFrom: '', customTo: '', loaded: false }
+}
+
+const TABS = [
+    { label: '30D', days: 30 },
+    { label: '90D', days: 90 },
+    { label: '180D', days: 180 },
+    { label: 'Custom', days: 0 },
+]
+
+export default function WatchlistPage() {
+    const searchParams = useSearchParams()
+    const highlightSym = (searchParams.get('sym') ?? '').toUpperCase()
+
+    const [items, setItems] = useState<WatchlistItem[]>([])
+    const [loading, setLoading] = useState(true)
+    const [error, setError] = useState<string | null>(null)
+    const [expMap, setExpMap] = useState<Record<string, ExpandState>>({})
+
+    const loadList = useCallback(async () => {
+        try {
+            const res = await fetch('/api/watchlist')
+            if (!res.ok) throw new Error('Failed')
+            const data = await res.json()
+            setItems((Array.isArray(data) ? data : []).map((item: any) => ({
+                watchlist_id: Number(item.watchlist_id ?? 0),
+                symbol: String(item.symbol ?? ''),
+                name: String(item.name ?? ''),
+                sector: item.sector ?? undefined,
+                close_price: item.close_price == null ? undefined : toN(item.close_price),
+                percent_change: item.percent_change == null ? undefined : toN(item.percent_change),
+                trading_date: item.trading_date ?? undefined,
+            })))
+        } catch (e) { setError(e instanceof Error ? e.message : 'Error') }
+        finally { setLoading(false) }
+    }, [])
+
+    useEffect(() => { loadList() }, [loadList])
+
+    // Core fetch — cache-first, then DB, then trigger auto-fetch if empty
+    const doFetch = useCallback(async (symbol: string, days: number, from?: string, to?: string): Promise<PriceRow[]> => {
+        const fromDate = from ?? daysAgo(days || 30)
+        const toDate = to ?? todayStr()
+        const ck = days > 0 ? cKey(symbol, days) : `${symbol}:${fromDate}:${toDate}`
+
+        const cached = cGet(ck)
+        if (cached && (days === 0 || cached.length >= 2)) return cached
+
+        // Fetch from DB via history API
+        const url = `/api/stocks/${encodeURIComponent(symbol)}/history?from=${fromDate}&to=${toDate}`
+        const res = await fetch(url)
+        const json = await res.json()
+
+        let rows: PriceRow[] = Array.isArray(json.history)
+            ? json.history.map((r: any) => ({
+                date: String(r.date ?? ''),
+                open: toN(r.open),
+                high: toN(r.high),
+                low: toN(r.low),
+                close: toN(r.close),
+                volume: toN(r.volume),
+                percent_change: toN(r.percent_change),
+            }))
+            : []
+
+        // DB miss — trigger auto-fetch from merolagani, wait for it, reload
+        if (rows.length < 2) {
+            const refillDays = days > 0 ? Math.max(days, 180) : 180
+            const afRes = await fetch('/api/auto-fetch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: 'symbol_history', symbol, days: refillDays }),
+            })
+            const afJson = await afRes.json()
+
+            if (Number(afJson.loaded ?? 0) > 0) {
+                // Data was fetched — reload from DB
+                const res2 = await fetch(url)
+                const json2 = await res2.json()
+                rows = Array.isArray(json2.history)
+                    ? json2.history.map((r: any) => ({
+                        date: String(r.date ?? ''),
+                        open: toN(r.open),
+                        high: toN(r.high),
+                        low: toN(r.low),
+                        close: toN(r.close),
+                        volume: toN(r.volume),
+                        percent_change: toN(r.percent_change),
+                    }))
+                    : []
+            }
+        }
+
+        cSet(ck, rows)
+        return rows
+    }, [])
+
+    const loadHistory = useCallback(async (symbol: string, days: number, from?: string, to?: string) => {
+        setExpMap(prev => ({
+            ...prev,
+            [symbol]: { ...(prev[symbol] ?? mkExp()), open: true, days, loading: true }
+        }))
+        const rows = await doFetch(symbol, days, from, to)
+        setExpMap(prev => ({
+            ...prev,
+            [symbol]: { ...(prev[symbol] ?? mkExp()), open: true, days, rows, loading: false, loaded: true }
+        }))
+    }, [doFetch])
+
+    const toggleExpand = useCallback(async (symbol: string) => {
+        const cur = expMap[symbol]
+        if (cur?.open) {
+            setExpMap(prev => ({ ...prev, [symbol]: { ...(prev[symbol] ?? mkExp()), open: false } }))
+            return
+        }
+        if (cur?.loaded) {
+            setExpMap(prev => ({ ...prev, [symbol]: { ...(prev[symbol] ?? mkExp()), open: true } }))
+            return
+        }
+        await loadHistory(symbol, 30)
+    }, [expMap, loadHistory])
+
+    const switchTab = useCallback(async (symbol: string, days: number) => {
+        if (days === 0) {
+            setExpMap(prev => ({ ...prev, [symbol]: { ...(prev[symbol] ?? mkExp()), days: 0 } }))
+            return
+        }
+        await loadHistory(symbol, days)
+    }, [loadHistory])
+
+    const applyCustom = useCallback(async (symbol: string, from: string, to: string) => {
+        await loadHistory(symbol, 0, from, to)
+    }, [loadHistory])
+
+    const remove = useCallback(async (symbol: string) => {
+        await fetch('/api/watchlist', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ symbol }),
+        })
+        setItems(p => p.filter(i => i.symbol !== symbol))
+        setExpMap(p => { const n = { ...p }; delete n[symbol]; return n })
+        _cache.forEach((_, k) => { if (k.startsWith(symbol + ':')) _cache.delete(k) })
+    }, [])
+
+    if (loading) return (
+        <div className="max-w-5xl mx-auto p-8 text-center">
+            <div className="w-8 h-8 border-4 border-gray-700 border-t-emerald-500 rounded-full animate-spin mx-auto" />
+            <p className="text-gray-500 mt-4 text-sm">Loading watchlist…</p>
+        </div>
+    )
+
+    if (error) return (
+        <div className="max-w-5xl mx-auto p-8 text-center">
+            <p className="text-red-400 text-sm">{error}</p>
+            <button onClick={() => { setError(null); setLoading(true); loadList() }}
+                className="mt-4 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm">Retry</button>
+        </div>
+    )
+
+    return (
         <div className="max-w-5xl mx-auto space-y-5">
-            <div className="flex items-center justify-between">
-                <div>
-                    <h1 className="text-lg font-semibold text-white">Watchlist</h1>
-                    <p className="text-sm text-gray-500 mt-0.5">
-                        {items.length} {items.length === 1 ? 'company' : 'companies'} tracked
-                    </p>
-                </div>
+            <div>
+                <h1 className="text-lg font-semibold text-white">Watchlist</h1>
+                <p className="text-sm text-gray-500 mt-0.5">
+                    {items.length} {items.length === 1 ? 'company' : 'companies'} tracked
+                </p>
             </div>
 
-            {fetchingSym && <WatchlistFetchBanner symbol={fetchingSym} />}
-
-            {highlightSym && !fetchingSym && (
+            {highlightSym && (
                 <div className="bg-amber-950/40 border border-amber-800/50 rounded-xl px-4 py-3 flex items-center gap-2.5">
                     <svg className="w-4 h-4 text-amber-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                            d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
                     <span className="text-sm text-amber-400">{highlightSym} is already in your watchlist</span>
                 </div>
@@ -218,153 +322,220 @@ export default function WatchlistPage() {
 
             {items.length === 0 ? (
                 <div className="bg-gray-900 border border-gray-800 rounded-xl p-12 text-center">
-                    <div className="w-12 h-12 bg-gray-800 rounded-full flex items-center justify-center mx-auto mb-4">
-                        <svg className="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                                d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
-                        </svg>
-                    </div>
                     <p className="text-gray-400 text-sm">Your watchlist is empty</p>
-                    <p className="text-gray-600 text-xs mt-1">Select a company from portfolio and add it to your watchlist</p>
-                    <Link href="/dashboard/portfolio" className="inline-block mt-4 text-xs text-emerald-400 hover:text-emerald-300 transition-colors">
-                        Go to portfolio →
+                    <Link href="/dashboard"
+                        className="inline-block mt-4 text-xs text-emerald-400 hover:text-emerald-300">
+                        Go to dashboard and click + Watch on any company →
                     </Link>
                 </div>
             ) : (
-                <div className="grid gap-4">
-                    {items.map((item) => {
+                <div className="space-y-4">
+                    {items.map(item => {
                         const up = (item.percent_change ?? 0) >= 0
-                        const isExpanded = !!expanded[item.symbol]
-                        const expandData = expanded[item.symbol]
-                        const isFetching = item.symbol.toUpperCase() === fetchingSym
+                        const exp = expMap[item.symbol]
+                        const isOpen = exp?.open ?? false
+                        const isLoading = exp?.loading ?? false
 
                         return (
-                            <div key={item.watchlist_id || item.symbol} className={`bg-gray-900 border rounded-xl overflow-hidden ${isFetching ? 'border-emerald-800/60 shadow-sm shadow-emerald-900/30' : 'border-gray-800'}`}>
-                                {/* Main item row */}
-                                <div className="p-4 flex items-center justify-between hover:bg-gray-800/50 transition-colors">
-                                    <div className="flex items-center gap-4 flex-1">
-                                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-xs font-bold ${isFetching ? 'bg-emerald-600/20 text-emerald-400' : 'bg-gray-800 text-gray-300'}`}>
-                                            {item.symbol?.slice(0, 2)}
-                                        </div>
-                                        <div className="flex-1">
+                            <div key={item.watchlist_id || item.symbol}
+                                className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+
+                                {/* Item row — matches image 3 layout */}
+                                <div className="flex items-center px-5 py-4 hover:bg-gray-800/30 transition-colors">
+                                    {/* Avatar */}
+                                    <div className="w-10 h-10 rounded-lg bg-gray-800 flex items-center
+                                        justify-center text-xs font-bold text-gray-300 shrink-0 mr-4">
+                                        {item.symbol.slice(0, 2)}
+                                    </div>
+
+                                    {/* Symbol + name + sector */}
+                                    <div className="flex-1 min-w-0 mr-4">
+                                        <div className="flex items-center gap-2 flex-wrap">
                                             <Link href={`/dashboard/stock/${item.symbol}`}
-                                                className="font-semibold text-white hover:text-emerald-400 transition-colors text-sm">
+                                                className="font-bold text-white hover:text-emerald-400 transition-colors">
                                                 {item.symbol}
                                             </Link>
-                                            <p className="text-xs text-gray-500 mt-0.5 max-w-[200px] truncate">{item.name}</p>
+                                            {item.sector && (
+                                                <span className="text-xs bg-gray-800 text-gray-400 px-2 py-0.5 rounded-full">
+                                                    {item.sector.split(' ').slice(0, 2).join(' ')}
+                                                </span>
+                                            )}
                                         </div>
-                                        <span className="text-xs bg-gray-800 text-gray-400 px-2 py-0.5 rounded-full hidden sm:inline-block">
-                                            {item.sector?.split(' ').slice(0, 2).join(' ')}
-                                        </span>
+                                        <p className="text-xs text-gray-500 mt-0.5 truncate max-w-[280px]">{item.name}</p>
                                     </div>
 
-                                    <div className="flex items-center gap-4">
-                                        {isFetching ? (
-                                            <div className="flex items-center gap-2 text-emerald-400">
-                                                <svg className="animate-spin w-3.5 h-3.5" fill="none" viewBox="0 0 24 24">
-                                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                                                </svg>
-                                                <span className="text-xs">Loading 30-day history...</span>
-                                            </div>
-                                        ) : item.close_price != null ? (
+                                    {/* Price + change */}
+                                    <div className="text-right mr-4 shrink-0">
+                                        {item.close_price != null ? (
                                             <>
-                                                <div className="text-right">
-                                                    <p className="text-sm font-medium text-white">
-                                                        Rs. {item.close_price?.toLocaleString()}
-                                                    </p>
-                                                    <p className="text-xs text-gray-500">
-                                                        {item.trading_date
-                                                            ? new Date(item.trading_date).toLocaleDateString('en-NP', { month: 'short', day: 'numeric' })
-                                                            : ''}
-                                                    </p>
-                                                </div>
-                                                <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${up ? 'bg-emerald-950 text-emerald-400' : 'bg-red-950 text-red-400'}`}>
-                                                    {up ? '+' : ''}{fmt2(item.percent_change)}%
-                                                </span>
+                                                <p className="font-bold text-white">
+                                                    Rs. {item.close_price.toLocaleString()}
+                                                </p>
+                                                <p className="text-xs text-gray-500">
+                                                    {item.trading_date
+                                                        ? new Date(item.trading_date).toLocaleDateString('en-NP',
+                                                            { month: 'short', day: 'numeric' })
+                                                        : ''}
+                                                </p>
                                             </>
                                         ) : (
-                                            <span className="text-xs text-gray-600">No price data</span>
+                                            <p className="text-xs text-gray-600">No price</p>
                                         )}
-
-                                        {/* View History Button */}
-                                        <button
-                                            onClick={() => toggleExpand(item.symbol)}
-                                            className="text-xs px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white rounded transition-colors"
-                                        >
-                                            {isExpanded ? '✕' : '📊 History'}
-                                        </button>
-
-                                        {/* Remove button */}
-                                        <button
-                                            onClick={() => removeFromWatchlist(item.symbol)}
-                                            className="text-xs px-2 py-1.5 text-gray-400 hover:text-red-400 transition-colors"
-                                        >
-                                            ✕
-                                        </button>
                                     </div>
+
+                                    {/* % change badge */}
+                                    {item.percent_change != null && (
+                                        <div className={`mr-4 shrink-0 text-sm font-bold px-3 py-1 rounded
+                                            ${up ? 'bg-red-900/60 text-red-400' : 'bg-red-900/60 text-red-400'}
+                                            ${up ? '!bg-transparent text-emerald-400' : ''}`}
+                                            style={{
+                                                background: up ? 'rgba(16,185,129,0.15)' : 'rgba(248,113,113,0.15)',
+                                                color: up ? '#34d399' : '#f87171'
+                                            }}>
+                                            {up ? '' : ''}{fmt2(item.percent_change)}%
+                                        </div>
+                                    )}
+
+                                    {/* History / Close button */}
+                                    <button onClick={() => toggleExpand(item.symbol)}
+                                        className={`mr-3 shrink-0 text-xs px-4 py-1.5 rounded border transition-colors
+                                            ${isOpen
+                                                ? 'border-gray-600 bg-gray-700 text-white'
+                                                : 'border-gray-700 text-gray-300 hover:border-gray-500'}`}>
+                                        {isOpen ? 'Close' : 'History'}
+                                    </button>
+
+                                    {/* Remove */}
+                                    <button onClick={() => remove(item.symbol)}
+                                        className="shrink-0 text-gray-600 hover:text-red-400 transition-colors p-1">
+                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                                                d="M6 18L18 6M6 6l12 12" />
+                                        </svg>
+                                    </button>
                                 </div>
 
-                                {/* Expanded History Section */}
-                                {isExpanded && (
-                                    <div className="border-t border-gray-800 bg-gray-950/50 p-4">
-                                        {expandData?.loading ? (
-                                            <div className="p-4 text-center text-gray-500 text-xs">
-                                                <div className="inline-block w-4 h-4 border-2 border-gray-700 border-t-emerald-500 rounded-full animate-spin"></div>
-                                            </div>
-                                        ) : expandData?.data?.length === 0 ? (
-                                            <p className="text-xs text-gray-600 p-4 text-center">No historical data found</p>
-                                        ) : (
-                                            <div className="space-y-4">
-                                                <PriceChart
-                                                    title="Price vs Date"
-                                                    symbol={item.symbol}
-                                                    initialData={expandData.data.map((record) => ({
-                                                        date: record.trading_date,
-                                                        open: toNumber(record.open_price),
-                                                        high: toNumber(record.high_price),
-                                                        low: toNumber(record.low_price),
-                                                        close: toNumber(record.close_price),
-                                                        volume: toNumber(record.volume),
-                                                    }))}
-                                                    onRangeChange={(range) => {
-                                                        void fetchHistoryData(item.symbol, range.from, range.to, range.days ?? 30)
-                                                    }}
-                                                />
+                                {/* Expanded history panel */}
+                                {isOpen && (
+                                    <div className="border-t border-gray-800 bg-gray-950/60 px-5 py-4 space-y-4">
 
-                                                <div className="overflow-x-auto">
-                                                    <p className="text-xs text-gray-500 mb-2">Price history list</p>
-                                                    <table className="w-full text-xs">
-                                                        <thead>
-                                                            <tr className="border-b border-gray-700 text-gray-500">
-                                                                <th className="text-left px-2 py-2">Date</th>
-                                                                <th className="text-right px-2 py-2">Open</th>
-                                                                <th className="text-right px-2 py-2">High</th>
-                                                                <th className="text-right px-2 py-2">Low</th>
-                                                                <th className="text-right px-2 py-2">Close</th>
-                                                                <th className="text-right px-2 py-2">Change %</th>
-                                                                <th className="text-right px-2 py-2">Volume</th>
-                                                            </tr>
-                                                        </thead>
-                                                        <tbody>
-                                                            {expandData?.data?.map((record, idx) => (
-                                                                <tr key={idx} className="border-b border-gray-800 hover:bg-gray-800/30 transition-colors">
-                                                                    <td className="px-2 py-2 text-gray-300">
-                                                                        {new Date(record.trading_date).toLocaleDateString('en-NP')}
-                                                                    </td>
-                                                                    <td className="text-right px-2 py-2 text-gray-300">{fmt2(record.open_price)}</td>
-                                                                    <td className="text-right px-2 py-2 text-gray-300">{fmt2(record.high_price)}</td>
-                                                                    <td className="text-right px-2 py-2 text-gray-300">{fmt2(record.low_price)}</td>
-                                                                    <td className="text-right px-2 py-2 font-semibold text-white">{fmt2(record.close_price)}</td>
-                                                                    <td className={`text-right px-2 py-2 font-semibold ${record.percent_change >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                                                                        {record.percent_change >= 0 ? '+' : ''}{fmt2(record.percent_change)}%
-                                                                    </td>
-                                                                    <td className="text-right px-2 py-2 text-gray-400">{record.volume?.toLocaleString()}</td>
-                                                                </tr>
-                                                            ))}
-                                                        </tbody>
-                                                    </table>
+                                        {/* Range tabs — 30D / 90D / 180D / Custom */}
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                            {TABS.map(t => (
+                                                <button key={t.label}
+                                                    onClick={() => switchTab(item.symbol, t.days)}
+                                                    disabled={isLoading}
+                                                    className={`px-4 py-1.5 text-xs font-medium rounded-lg border transition-colors
+                                                        disabled:opacity-50
+                                                        ${(exp?.days ?? 30) === t.days
+                                                            ? 'bg-emerald-600 border-emerald-600 text-white'
+                                                            : 'border-gray-700 text-gray-300 hover:border-gray-500 hover:text-white'}`}>
+                                                    {t.label}
+                                                </button>
+                                            ))}
+
+                                            {/* Custom date pickers */}
+                                            {(exp?.days ?? 30) === 0 && (
+                                                <div className="flex items-center gap-2 ml-1">
+                                                    <input type="date"
+                                                        value={exp?.customFrom ?? ''}
+                                                        onChange={e => setExpMap(p => ({
+                                                            ...p, [item.symbol]: { ...(p[item.symbol] ?? mkExp()), customFrom: e.target.value }
+                                                        }))}
+                                                        className="bg-gray-800 border border-gray-700 text-white text-xs
+                                                            px-2 py-1.5 rounded-lg focus:outline-none focus:border-emerald-500" />
+                                                    <span className="text-gray-600 text-xs">to</span>
+                                                    <input type="date"
+                                                        value={exp?.customTo ?? ''}
+                                                        onChange={e => setExpMap(p => ({
+                                                            ...p, [item.symbol]: { ...(p[item.symbol] ?? mkExp()), customTo: e.target.value }
+                                                        }))}
+                                                        className="bg-gray-800 border border-gray-700 text-white text-xs
+                                                            px-2 py-1.5 rounded-lg focus:outline-none focus:border-emerald-500" />
+                                                    <button
+                                                        onClick={() => {
+                                                            const f = exp?.customFrom ?? '', t2 = exp?.customTo ?? ''
+                                                            if (f && t2) void applyCustom(item.symbol, f, t2)
+                                                        }}
+                                                        disabled={!exp?.customFrom || !exp?.customTo || isLoading}
+                                                        className="text-xs px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500
+                                                            text-white rounded-lg transition-colors disabled:opacity-50">
+                                                        Apply
+                                                    </button>
                                                 </div>
+                                            )}
+
+                                            {isLoading && (
+                                                <div className="ml-auto flex items-center gap-1.5 text-xs text-amber-400">
+                                                    <svg className="animate-spin w-3 h-3" fill="none" viewBox="0 0 24 24">
+                                                        <circle className="opacity-25" cx="12" cy="12" r="10"
+                                                            stroke="currentColor" strokeWidth="4" />
+                                                        <path className="opacity-75" fill="currentColor"
+                                                            d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                                                    </svg>
+                                                    Loading…
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {/* Chart */}
+                                        {isLoading && (!exp?.rows?.length) ? (
+                                            <div className="animate-pulse space-y-3">
+                                                <div className="h-[200px] bg-gray-800/60 rounded-lg" />
+                                                <div className="h-[60px]  bg-gray-800/40 rounded-lg" />
+                                            </div>
+                                        ) : !exp?.rows?.length ? (
+                                            <div className="py-10 text-center">
+                                                <p className="text-gray-500 text-sm">No data for this range</p>
+                                                <p className="text-gray-600 text-xs mt-1">
+                                                    Try a different range — data will be fetched from the API if missing
+                                                </p>
+                                            </div>
+                                        ) : (
+                                            <MiniChart rows={exp.rows} symbol={item.symbol} />
+                                        )}
+
+                                        {/* Price history table */}
+                                        {(exp?.rows?.length ?? 0) > 0 && !isLoading && (
+                                            <div className="overflow-x-auto">
+                                                <p className="text-xs text-gray-500 mb-2">
+                                                    {exp.rows.length} trading days
+                                                </p>
+                                                <table className="w-full text-xs">
+                                                    <thead>
+                                                        <tr className="border-b border-gray-700">
+                                                            <th className="text-left  px-3 py-2 text-gray-500 font-medium">Date</th>
+                                                            <th className="text-right px-3 py-2 text-gray-500 font-medium">Open</th>
+                                                            <th className="text-right px-3 py-2 text-gray-500 font-medium">High</th>
+                                                            <th className="text-right px-3 py-2 text-gray-500 font-medium">Low</th>
+                                                            <th className="text-right px-3 py-2 text-gray-500 font-medium">Close</th>
+                                                            <th className="text-right px-3 py-2 text-gray-500 font-medium">Change%</th>
+                                                            <th className="text-right px-3 py-2 text-gray-500 font-medium">Volume</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {exp.rows.map((r, i) => (
+                                                            <tr key={i} className="border-b border-gray-800/60 hover:bg-gray-800/30">
+                                                                <td className="px-3 py-2 text-gray-300">
+                                                                    {new Date(r.date).toLocaleDateString('en-NP', {
+                                                                        year: 'numeric', month: 'numeric', day: 'numeric'
+                                                                    })}
+                                                                </td>
+                                                                <td className="text-right px-3 py-2 text-gray-300">{fmt2(r.open)}</td>
+                                                                <td className="text-right px-3 py-2 text-gray-300">{fmt2(r.high)}</td>
+                                                                <td className="text-right px-3 py-2 text-gray-300">{fmt2(r.low)}</td>
+                                                                <td className="text-right px-3 py-2 font-bold text-white">{fmt2(r.close)}</td>
+                                                                <td className={`text-right px-3 py-2 font-semibold
+                                                                    ${r.percent_change >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                                                    {r.percent_change >= 0 ? '+' : ''}{fmt2(r.percent_change)}%
+                                                                </td>
+                                                                <td className="text-right px-3 py-2 text-gray-400">
+                                                                    {r.volume.toLocaleString()}
+                                                                </td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
                                             </div>
                                         )}
                                     </div>
